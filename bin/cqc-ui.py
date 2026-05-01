@@ -23,8 +23,54 @@ from datetime import datetime, timezone
 
 ROOT = os.environ.get("CQC_ROOT", os.getcwd())
 PORT = int(os.environ.get("CQC_PORT", "4020"))
-VERSION = os.environ.get("CQC_VERSION", "v3.13")
+VERSION = os.environ.get("CQC_VERSION", "v3.15")
 CLIS = ("claude", "gemini", "opencode", "codex")
+BUDGET_FILE = os.path.expanduser("~/.cqc/budget.json")
+USAGE_FILE  = os.path.expanduser("~/.cqc/usage.json")
+
+
+def load_budget():
+    try:
+        with open(BUDGET_FILE) as f: return json.load(f)
+    except Exception:
+        return {"caps_pct": {"claude":0,"codex":50,"gemini":100,"opencode":100},
+                "models": {"opencode_model":"opencode-go/glm-5.1",
+                           "gemini_primary":"gemini-3.1-pro-preview",
+                           "gemini_fallback":"gemini-2.5-flash"},
+                "parallel_max": 20, "shard_max_files": 25}
+
+
+def load_usage():
+    try:
+        with open(USAGE_FILE) as f: return json.load(f)
+    except Exception:
+        return {"by_cli": {c: {"today_usd":0.0,"today_tokens":0,"calls_today":0} for c in CLIS}}
+
+
+def get_metrics():
+    b = load_budget()
+    u = load_usage()
+    out = {"caps_pct": b.get("caps_pct", {}),
+           "models":   b.get("models", {}),
+           "parallel_max": b.get("parallel_max", 20),
+           "by_cli": {}}
+    for cli in CLIS:
+        cap = b.get("caps_pct", {}).get(cli, 0)
+        usage = (u.get("by_cli", {}).get(cli) or {})
+        used_pct = usage.get("used_pct", 0)
+        out["by_cli"][cli] = {
+            "cap_pct":      cap,
+            "used_pct":     used_pct,
+            "today_usd":    usage.get("today_usd", 0.0),
+            "calls_today":  usage.get("calls_today", 0),
+            "remaining_pct": max(0, cap - used_pct),
+            "blocked":      cap == 0,
+            "model":        b.get("models", {}).get(f"{cli}_model") or
+                            (b.get("models", {}).get("gemini_primary") if cli == "gemini"
+                             else b.get("models", {}).get("opencode_model") if cli == "opencode"
+                             else None),
+        }
+    return out
 
 PROCS_LOCK = threading.Lock()
 RUNNING_PROCS = {}  # run_id -> {pid, scope, clis, started, proc}
@@ -50,6 +96,7 @@ def time_ago(iso):
 
 def cli_status():
     out = []
+    metrics = get_metrics()
     for name in CLIS:
         installed, ver = False, None
         try:
@@ -77,9 +124,16 @@ def cli_status():
         elif name == "gemini":
             if os.path.isfile(os.path.expanduser("~/.gemini/google_accounts.json")):
                 plan = "free"
+        m = metrics["by_cli"].get(name, {})
         out.append({
             "name": name, "installed": installed, "version": ver,
-            "plan": plan, "today_usd": 0.0, "week_pct": 0,
+            "plan": plan,
+            "today_usd": m.get("today_usd", 0.0),
+            "week_pct": m.get("used_pct", 0),
+            "cap_pct": m.get("cap_pct", 0),
+            "used_pct": m.get("used_pct", 0),
+            "blocked": m.get("blocked", False),
+            "model": m.get("model"),
         })
     return out
 
@@ -161,12 +215,15 @@ def get_state():
     }
 
 
-def spawn_run(scope, clis_list):
+def spawn_run(scope, clis_list, mode="parallel", max_parallel=20):
     run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d__ui-%H%M%S")
-    cmd = ["cqc-parallel"]
-    if clis_list:
-        cmd.append(f"--clis={','.join(clis_list)}")
-    cmd.append(scope or ".")
+    if mode == "orchestrate":
+        cmd = ["cqc-orchestrate", f"--max-parallel={int(max_parallel)}", scope or "."]
+    else:
+        cmd = ["cqc-parallel"]
+        if clis_list:
+            cmd.append(f"--clis={','.join(clis_list)}")
+        cmd.append(scope or ".")
     try:
         proc = subprocess.Popen(
             cmd, cwd=ROOT,
@@ -209,11 +266,11 @@ def safe_run_id(s):
     return bool(re.match(r"^[A-Za-z0-9_\-:.]{1,64}$", s or ""))
 
 
-CSS = "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 'JetBrains Mono','SF Mono',Consolas,monospace;min-width:1280px}.wrap{max-width:1280px;margin:0 auto;padding:20px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}header h1{margin:0;font-size:18px;letter-spacing:-.01em}header h1 small{color:var(--muted);font-weight:400;margin-left:8px;font-size:12px}.actions button{background:var(--card);color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:6px;font:inherit;cursor:pointer;margin-left:6px}.actions button:hover{border-color:var(--green)}.actions button.danger:hover{border-color:var(--red)}.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}.tile{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px;cursor:pointer}.tile:hover{border-color:var(--violet)}.tile .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}.tile .name{font-weight:600;text-transform:lowercase}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--slate)}.dot.green{background:var(--green)}.dot.amber{background:var(--amber);animation:pulse 1.4s infinite}.dot.red{background:var(--red)}.dot.slate{background:var(--slate)}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}.tile .meta{color:var(--muted);font-size:11px;line-height:1.7}.tile .meta b{color:var(--fg);font-weight:500}.tile .usd{color:var(--violet);font-weight:600}.bar{height:4px;background:var(--border);border-radius:2px;margin-top:6px;overflow:hidden}.bar>span{display:block;height:100%;background:var(--violet)}section{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:16px}section h2{margin:0;padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 16px;text-align:left;border-bottom:1px solid var(--border)}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(255,255,255,.02)}th{color:var(--muted);font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.row-click{cursor:pointer}.empty{padding:32px 16px;text-align:center;color:var(--muted)}.btn-x{background:transparent;color:var(--muted);border:1px solid var(--border);padding:3px 10px;border-radius:4px;font:inherit;font-size:11px;cursor:pointer}.btn-x:hover{border-color:var(--red);color:var(--red)}.pills{display:flex;gap:6px;padding:14px 16px;flex-wrap:wrap}.pill{padding:6px 12px;border-radius:99px;font-size:11px;background:var(--border);color:var(--muted);cursor:pointer}.pill.green{background:rgba(34,197,94,.18);color:var(--green)}.pill.amber{background:rgba(245,158,11,.18);color:var(--amber)}.pill.red{background:rgba(239,68,68,.18);color:var(--red)}.pill.slate{background:rgba(100,116,139,.18);color:var(--slate)}.split{display:grid;grid-template-columns:1fr 320px;gap:16px;margin-bottom:16px}.spend{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}.spend .big{font-size:28px;font-weight:700;color:var(--violet);cursor:pointer}.spend .lab{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}.spark{display:flex;gap:3px;align-items:flex-end;height:40px;margin-top:10px}.spark span{flex:1;background:var(--violet);opacity:.7;min-height:2px;border-radius:1px}footer{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;padding:8px 0}.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}.modal.on{display:flex}.modal .box{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;width:420px}.modal h3{margin:0 0 14px;font-size:14px}.modal label{display:block;margin:6px 0;cursor:pointer}.modal input[type=text]{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:8px;border-radius:6px;font:inherit;margin-top:8px}.modal .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--red);border-radius:8px;padding:10px 14px;font-size:12px;z-index:60;display:none}.toast.on{display:block}.drawer{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center;z-index:55}.drawer.on{display:flex}.drawer .panel{background:var(--card);border-top:1px solid var(--border);border-radius:10px 10px 0 0;width:100%;max-width:1280px;max-height:70vh;overflow:auto;padding:16px}.drawer h3{margin:0 0 10px;font-size:13px}.drawer pre{background:var(--bg);border:1px solid var(--border);padding:10px;border-radius:6px;font:12px/1.4 inherit;white-space:pre-wrap;color:var(--muted);max-height:50vh;overflow:auto}.tag{display:inline-block;padding:2px 8px;border-radius:4px;background:var(--border);font-size:10px;color:var(--muted)}"
+CSS = ".tile-blocked{opacity:.45;border-color:var(--red)!important}.cap-line{position:absolute;top:-2px;width:2px;height:8px;background:var(--amber)}.bar{position:relative}#mp-row label{font-size:11px;color:var(--muted);margin-bottom:4px;display:block}#mp{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:8px;border-radius:6px;font:inherit}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 'JetBrains Mono','SF Mono',Consolas,monospace;min-width:1280px}.wrap{max-width:1280px;margin:0 auto;padding:20px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}header h1{margin:0;font-size:18px;letter-spacing:-.01em}header h1 small{color:var(--muted);font-weight:400;margin-left:8px;font-size:12px}.actions button{background:var(--card);color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:6px;font:inherit;cursor:pointer;margin-left:6px}.actions button:hover{border-color:var(--green)}.actions button.danger:hover{border-color:var(--red)}.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}.tile{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px;cursor:pointer}.tile:hover{border-color:var(--violet)}.tile .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}.tile .name{font-weight:600;text-transform:lowercase}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--slate)}.dot.green{background:var(--green)}.dot.amber{background:var(--amber);animation:pulse 1.4s infinite}.dot.red{background:var(--red)}.dot.slate{background:var(--slate)}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}.tile .meta{color:var(--muted);font-size:11px;line-height:1.7}.tile .meta b{color:var(--fg);font-weight:500}.tile .usd{color:var(--violet);font-weight:600}.bar{height:4px;background:var(--border);border-radius:2px;margin-top:6px;overflow:hidden}.bar>span{display:block;height:100%;background:var(--violet)}section{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:16px}section h2{margin:0;padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 16px;text-align:left;border-bottom:1px solid var(--border)}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(255,255,255,.02)}th{color:var(--muted);font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.row-click{cursor:pointer}.empty{padding:32px 16px;text-align:center;color:var(--muted)}.btn-x{background:transparent;color:var(--muted);border:1px solid var(--border);padding:3px 10px;border-radius:4px;font:inherit;font-size:11px;cursor:pointer}.btn-x:hover{border-color:var(--red);color:var(--red)}.pills{display:flex;gap:6px;padding:14px 16px;flex-wrap:wrap}.pill{padding:6px 12px;border-radius:99px;font-size:11px;background:var(--border);color:var(--muted);cursor:pointer}.pill.green{background:rgba(34,197,94,.18);color:var(--green)}.pill.amber{background:rgba(245,158,11,.18);color:var(--amber)}.pill.red{background:rgba(239,68,68,.18);color:var(--red)}.pill.slate{background:rgba(100,116,139,.18);color:var(--slate)}.split{display:grid;grid-template-columns:1fr 320px;gap:16px;margin-bottom:16px}.spend{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}.spend .big{font-size:28px;font-weight:700;color:var(--violet);cursor:pointer}.spend .lab{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}.spark{display:flex;gap:3px;align-items:flex-end;height:40px;margin-top:10px}.spark span{flex:1;background:var(--violet);opacity:.7;min-height:2px;border-radius:1px}footer{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;padding:8px 0}.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}.modal.on{display:flex}.modal .box{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;width:420px}.modal h3{margin:0 0 14px;font-size:14px}.modal label{display:block;margin:6px 0;cursor:pointer}.modal input[type=text]{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:8px;border-radius:6px;font:inherit;margin-top:8px}.modal .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--red);border-radius:8px;padding:10px 14px;font-size:12px;z-index:60;display:none}.toast.on{display:block}.drawer{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center;z-index:55}.drawer.on{display:flex}.drawer .panel{background:var(--card);border-top:1px solid var(--border);border-radius:10px 10px 0 0;width:100%;max-width:1280px;max-height:70vh;overflow:auto;padding:16px}.drawer h3{margin:0 0 10px;font-size:13px}.drawer pre{background:var(--bg);border:1px solid var(--border);padding:10px;border-radius:6px;font:12px/1.4 inherit;white-space:pre-wrap;color:var(--muted);max-height:50vh;overflow:auto}.tag{display:inline-block;padding:2px 8px;border-radius:4px;background:var(--border);font-size:10px;color:var(--muted)}"
 
-JS = r"""let STATE=null;const $=(id)=>document.getElementById(id);function fmt(n){return Number(n||0).toLocaleString()}function render(s){STATE=s;$('ver').textContent=s.version;$('foot-l').textContent='connected · '+s.root;$('foot-r').textContent='runs:'+s.totals.runs+' · findings:'+fmt(s.totals.findings)+' · '+s.ts;$('tiles').innerHTML=s.clis.map(c=>{const cls=c.installed?'green':'slate';const pct=Math.min(100,c.week_pct||0);return `<div class="tile" data-cli="${c.name}"><div class="top"><span class="name">${c.name}</span><span class="dot ${cls}"></span></div><div class="meta"><b>${c.version||'—'}</b> · ${c.plan} · today <span class="usd">$${(c.today_usd||0).toFixed(2)}</span><div class="bar"><span style="width:${pct}%"></span></div></div></div>`;}).join('');document.querySelectorAll('.tile').forEach(t=>t.onclick=()=>openCli(t.dataset.cli));if(!s.active.length){$('active').innerHTML='<div class="empty">No active runs. Click ▶ Run Audit.</div>';}else{$('active').innerHTML='<table><thead><tr><th>Run</th><th>Scope</th><th>CLIs</th><th>Elapsed</th><th>Findings</th><th></th></tr></thead><tbody>'+s.active.map(r=>{const clis=Object.keys(r.agents||{}).join(' ')||(r.clis||[]).join(' ')||'all';return `<tr class="row-click" data-id="${r.id}"><td><span class="dot amber"></span> ${r.id}</td><td><span class="tag">${r.scope}</span></td><td>${clis}</td><td>${r.elapsed}</td><td>${fmt(r.findings)}</td><td><button class="btn-x" data-cancel="${r.id}">■ Stop</button></td></tr>`;}).join('')+'</tbody></table>';}document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=(e)=>{e.stopPropagation();cancelRun(b.dataset.cancel)});document.querySelectorAll('.row-click').forEach(r=>r.onclick=()=>openRun(r.dataset.id));$('recent').innerHTML=s.recent.length?s.recent.map(r=>{const cls={done:'green',failed:'red',timeout:'amber',cancelled:'slate'}[r.phase]||'slate';return `<span class="pill ${cls}" data-rid="${r.id}" title="${r.id}">${r.id.slice(-8)} · ${fmt(r.findings)}f</span>`;}).join(''):'<div class="empty" style="padding:14px">No history yet.</div>';document.querySelectorAll('[data-rid]').forEach(p=>p.onclick=()=>openRun(p.dataset.rid));$('spark').innerHTML=(s.totals.spark.length?s.totals.spark:[0]).map(v=>{const max=Math.max(...s.totals.spark,1);return `<span style="height:${Math.max(2,(v/max)*40)}px"></span>`;}).join('');}async function refresh(){const r=await fetch('/api/state');if(r.ok)render(await r.json());}function startSSE(){const es=new EventSource('/api/stream');es.onmessage=e=>{try{render(JSON.parse(e.data))}catch{}};es.onerror=()=>{$('conn').className='dot red';setTimeout(()=>{es.close();startSSE()},5000);};es.onopen=()=>{$('conn').className='dot green'};}function openModal(){$('cli-checks').innerHTML=(STATE?STATE.clis:[]).map(c=>`<label><input type="checkbox" value="${c.name}" ${c.installed?'checked':'disabled'}> ${c.name}${c.installed?'':' (not installed)'}</label>`).join('');$('modal').classList.add('on');}function closeModal(){$('modal').classList.remove('on')}async function confirmRun(){const clis=[...document.querySelectorAll('#cli-checks input:checked')].map(i=>i.value);const scope=$('scope').value||'.';const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,clis})});const j=await r.json();closeModal();if(!r.ok){toast('Failed: '+(j.error||'unknown'));return}refresh();}async function cancelRun(id){await fetch('/api/cancel/'+encodeURIComponent(id),{method:'POST'});refresh();}async function pauseAll(){if(!STATE)return;for(const r of STATE.active)await cancelRun(r.id);}async function openRun(id){$('drawer-title').textContent='Run '+id;$('drawer-body').textContent='Loading…';$('drawer').classList.add('on');const clis=(STATE&&STATE.clis||[]).filter(c=>c.installed).map(c=>c.name);let buf='';for(const c of clis){const r=await fetch('/api/log/'+encodeURIComponent(id)+'/'+c);if(r.ok){const t=await r.text();if(t.trim())buf+='── '+c+' ──\n'+t.slice(-2000)+'\n\n';}}$('drawer-body').textContent=buf||'(no logs yet)';}function openCli(name){$('drawer-title').textContent='CLI · '+name;const recent=(STATE.recent||[]).concat(STATE.active||[]).slice(0,20);const lines=recent.map(r=>{const a=(r.agents||{})[name];return r.id+' · '+(a?a.status:'—')}).join('\n');$('drawer-body').textContent=lines||'(no recent invocations)';$('drawer').classList.add('on');}function closeDrawer(){$('drawer').classList.remove('on')}function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),5000)}$('run').onclick=openModal;$('pause').onclick=pauseAll;refresh();startSSE();"""
+JS = r"""let STATE=null;let MODE='parallel';const $=(id)=>document.getElementById(id);function fmt(n){return Number(n||0).toLocaleString()}function render(s){STATE=s;$('ver').textContent=s.version;$('foot-l').textContent='connected · '+s.root;$('foot-r').textContent='runs:'+s.totals.runs+' · findings:'+fmt(s.totals.findings)+' · '+s.ts;$('tiles').innerHTML=s.clis.map(c=>{const cls=c.blocked?'red':(c.installed?'green':'slate');const usedPct=Math.min(100,c.used_pct||0);const capPct=Math.max(0,Math.min(100,c.cap_pct||0));const blockedTag=c.blocked?'<span class="tag" style="color:var(--red);border-color:var(--red)">BLOCKED</span>':'';const capTag=c.cap_pct?`<span class="tag">cap ${c.cap_pct}%</span>`:'';const modelLine=c.model?`<div class="meta" style="font-size:10px;opacity:.7">↳ ${c.model}</div>`:'';return `<div class="tile ${c.blocked?'tile-blocked':''}" data-cli="${c.name}"><div class="top"><span class="name">${c.name} ${blockedTag}${capTag}</span><span class="dot ${cls}"></span></div><div class="meta"><b>${c.version||'—'}</b> · ${c.plan} · today <span class="usd">$${(c.today_usd||0).toFixed(2)}</span><div class="bar"><span style="width:${usedPct}%;background:${usedPct>=capPct?'var(--red)':'var(--violet)'}"></span><span class="cap-line" style="left:${capPct}%"></span></div></div>${modelLine}</div>`;}).join('');document.querySelectorAll('.tile').forEach(t=>t.onclick=()=>openCli(t.dataset.cli));if(!s.active.length){$('active').innerHTML='<div class="empty">No active runs. Click ▶ Orchestrate or ▶ Run Audit.</div>';}else{$('active').innerHTML='<table><thead><tr><th>Run</th><th>Mode</th><th>Scope</th><th>CLIs</th><th>Elapsed</th><th>Findings</th><th></th></tr></thead><tbody>'+s.active.map(r=>{const clis=Object.keys(r.agents||{}).join(' ')||(r.clis||[]).join(' ')||'all';const mode=(r.id||'').includes('orch')?'<span class="tag" style="color:var(--violet);border-color:var(--violet)">orch</span>':'<span class="tag">par</span>';return `<tr class="row-click" data-id="${r.id}"><td><span class="dot amber"></span> ${r.id}</td><td>${mode}</td><td><span class="tag">${r.scope}</span></td><td>${clis}</td><td>${r.elapsed}</td><td>${fmt(r.findings)}</td><td><button class="btn-x" data-cancel="${r.id}">■ Stop</button></td></tr>`;}).join('')+'</tbody></table>';}document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=(e)=>{e.stopPropagation();cancelRun(b.dataset.cancel)});document.querySelectorAll('.row-click').forEach(r=>r.onclick=()=>openRun(r.dataset.id));$('recent').innerHTML=s.recent.length?s.recent.map(r=>{const cls={done:'green',failed:'red',timeout:'amber',cancelled:'slate'}[r.phase]||'slate';return `<span class="pill ${cls}" data-rid="${r.id}" title="${r.id}">${r.id.slice(-8)} · ${fmt(r.findings)}f</span>`;}).join(''):'<div class="empty" style="padding:14px">No history yet.</div>';document.querySelectorAll('[data-rid]').forEach(p=>p.onclick=()=>openRun(p.dataset.rid));$('spark').innerHTML=(s.totals.spark.length?s.totals.spark:[0]).map(v=>{const max=Math.max(...s.totals.spark,1);return `<span style="height:${Math.max(2,(v/max)*40)}px"></span>`;}).join('');}async function refresh(){const r=await fetch('/api/state');if(r.ok)render(await r.json());}function startSSE(){const es=new EventSource('/api/stream');es.onmessage=e=>{try{render(JSON.parse(e.data))}catch{}};es.onerror=()=>{$('conn').className='dot red';setTimeout(()=>{es.close();startSSE()},5000);};es.onopen=()=>{$('conn').className='dot green'};}function openModal(mode){MODE=mode||'parallel';$('modal-title').textContent=MODE==='orchestrate'?'▶ Orchestrate (file-sharded, up to 20 parallel)':'▶ Run Audit (4 CLIs, 1 shard each)';$('mp-row').style.display=MODE==='orchestrate'?'block':'none';$('cli-checks').innerHTML=(STATE?STATE.clis:[]).map(c=>{const dis=(!c.installed||c.blocked);const lbl=c.name+(c.blocked?' (BLOCKED · cap 0%)':(c.installed?'':' (not installed)'));return `<label><input type="checkbox" value="${c.name}" ${dis?'disabled':'checked'}> ${lbl}</label>`;}).join('');$('modal').classList.add('on');}function closeModal(){$('modal').classList.remove('on')}async function confirmRun(){const clis=[...document.querySelectorAll('#cli-checks input:checked')].map(i=>i.value);const scope=$('scope').value||'.';const mp=parseInt($('mp').value||'20');const ep=MODE==='orchestrate'?'/api/orchestrate':'/api/run';const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,clis,max_parallel:mp})});const j=await r.json();closeModal();if(!r.ok){toast('Failed: '+(j.error||'unknown'));return}toast('Started '+j.run_id+' ('+j.mode+')');refresh();}async function cancelRun(id){await fetch('/api/cancel/'+encodeURIComponent(id),{method:'POST'});refresh();}async function pauseAll(){if(!STATE)return;for(const r of STATE.active)await cancelRun(r.id);}async function openRun(id){$('drawer-title').textContent='Run '+id;$('drawer-body').textContent='Loading…';$('drawer').classList.add('on');const clis=(STATE&&STATE.clis||[]).filter(c=>c.installed&&!c.blocked).map(c=>c.name);let buf='';for(const c of clis){const r=await fetch('/api/log/'+encodeURIComponent(id)+'/'+c);if(r.ok){const t=await r.text();if(t.trim())buf+='── '+c+' ──\n'+t.slice(-2000)+'\n\n';}}$('drawer-body').textContent=buf||'(no logs yet)';}function openCli(name){$('drawer-title').textContent='CLI · '+name;const recent=(STATE.recent||[]).concat(STATE.active||[]).slice(0,20);const lines=recent.map(r=>{const a=(r.agents||{})[name];return r.id+' · '+(a?a.status:'—')}).join('\n');$('drawer-body').textContent=lines||'(no recent invocations)';$('drawer').classList.add('on');}function closeDrawer(){$('drawer').classList.remove('on')}function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),5000)}$('orch').onclick=()=>openModal('orchestrate');$('run').onclick=()=>openModal('parallel');$('pause').onclick=pauseAll;refresh();startSSE();"""
 
-BODY = '<div class="wrap"><header><h1>cqc · <span class="dot green" id="conn"></span> live <small id="ver"></small></h1><div class="actions"><button id="run">▶ Run Audit</button><button class="danger" id="pause">⏸ Pause All</button></div></header><div class="tiles" id="tiles"></div><section><h2>Active runs</h2><div id="active"></div></section><div class="split"><section><h2>Recent runs</h2><div class="pills" id="recent"></div></section><div class="spend"><div class="lab">Total spend (7d)</div><div class="big" id="spend-total">$0.00</div><div class="spark" id="spark"></div></div></div><footer><span id="foot-l">connecting…</span><span id="foot-r"></span></footer></div><div class="modal" id="modal"><div class="box"><h3>Run audit</h3><div id="cli-checks"></div><input type="text" id="scope" value="." placeholder="scope (default .)"><div class="row"><button class="btn-x" onclick="closeModal()">Cancel</button><button onclick="confirmRun()">Confirm</button></div></div></div><div class="drawer" id="drawer"><div class="panel"><h3 id="drawer-title"></h3><pre id="drawer-body"></pre><div style="text-align:right;margin-top:10px"><button class="btn-x" onclick="closeDrawer()">Close</button></div></div></div><div class="toast" id="toast"></div>'
+BODY = '<div class="wrap"><header><h1>cqc · <span class="dot green" id="conn"></span> live <small id="ver"></small></h1><div class="actions"><button id="orch" style="border-color:var(--violet);color:var(--violet)">▶ Orchestrate (20p)</button><button id="run">▶ Run Audit</button><button class="danger" id="pause">⏸ Pause All</button></div></header><div class="tiles" id="tiles"></div><section><h2>Active runs</h2><div id="active"></div></section><div class="split"><section><h2>Recent runs</h2><div class="pills" id="recent"></div></section><div class="spend"><div class="lab">Total spend (7d)</div><div class="big" id="spend-total">$0.00</div><div class="spark" id="spark"></div></div></div><footer><span id="foot-l">connecting…</span><span id="foot-r"></span></footer></div><div class="modal" id="modal"><div class="box"><h3 id="modal-title">Run audit</h3><div id="cli-checks"></div><input type="text" id="scope" value="." placeholder="scope (default .)"><div id="mp-row" style="margin-top:8px;display:none"><label>Max parallel agents</label><input type="number" id="mp" value="20" min="1" max="50"></div><div class="row"><button class="btn-x" onclick="closeModal()">Cancel</button><button onclick="confirmRun()">Confirm</button></div></div></div><div class="drawer" id="drawer"><div class="panel"><h3 id="drawer-title"></h3><pre id="drawer-body"></pre><div style="text-align:right;margin-top:10px"><button class="btn-x" onclick="closeDrawer()">Close</button></div></div></div><div class="toast" id="toast"></div>'
 
 VARS = "--green:#22c55e;--amber:#f59e0b;--red:#ef4444;--slate:#64748b;--violet:#8b5cf6;--bg:#0a0d12;--card:#14181f;--border:#2a2f3b;--fg:#e6e8eb;--muted:#8b93a1"
 
@@ -246,6 +303,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             _send_json(self, 200, get_state()); return
+        if path == "/api/metrics":
+            _send_json(self, 200, get_metrics()); return
         if path == "/api/stream":
             self._stream(); return
         m = re.match(r"^/api/log/([^/]+)/([^/]+)$", path)
@@ -257,7 +316,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
-        if path == "/api/run":
+        if path in ("/api/run", "/api/orchestrate"):
             try:
                 body = json.loads(raw.decode() or "{}")
             except Exception:
@@ -265,10 +324,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             scope = (body.get("scope") or ".").strip()
             if not re.match(r"^[A-Za-z0-9_./\-]{1,200}$", scope):
                 _send_json(self, 400, {"error": "invalid scope"}); return
-            clis_in = [c for c in (body.get("clis") or []) if c in CLIS]
-            run_id, err = spawn_run(scope, clis_in)
+            # HARD-BLOCK claude unless cap > 0
+            metrics = get_metrics()
+            clis_in = []
+            for c in (body.get("clis") or []):
+                if c not in CLIS: continue
+                if c == "claude" and metrics["by_cli"].get("claude", {}).get("blocked"):
+                    continue   # silently drop
+                clis_in.append(c)
+            mode = "orchestrate" if path == "/api/orchestrate" else "parallel"
+            mp = int(body.get("max_parallel") or metrics.get("parallel_max", 20))
+            run_id, err = spawn_run(scope, clis_in, mode=mode, max_parallel=mp)
             if err: _send_json(self, 500, {"error": err}); return
-            _send_json(self, 200, {"run_id": run_id}); return
+            _send_json(self, 200, {"run_id": run_id, "mode": mode, "max_parallel": mp}); return
         m = re.match(r"^/api/cancel/(.+)$", path)
         if m:
             rid = m.group(1)

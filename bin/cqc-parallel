@@ -55,18 +55,39 @@ else
   C_CYAN=""; C_GREEN=""; C_AMBER=""; C_RED=""; C_BOLD=""; C_DIM=""; C_RST=""
 fi
 
+# ─── Budget config ────────────────────────────────────────────────
+BUDGET_FILE="$HOME/.cqc/budget.json"
+USAGE_FILE="$HOME/.cqc/usage.json"
+INCLUDE_CLAUDE=0
+[[ "${*}" == *"--include-claude"* ]] && INCLUDE_CLAUDE=1
+
+cap_for() {
+  local cli="$1"
+  jq -r --arg c "$cli" '.caps_pct[$c] // 0' "$BUDGET_FILE" 2>/dev/null || echo 0
+}
+model_for() {
+  jq -r --arg k "$1" '.models[$k] // ""' "$BUDGET_FILE" 2>/dev/null || echo ""
+}
+GEMINI_PRIMARY="$(model_for gemini_primary)"
+GEMINI_FALLBACK="$(model_for gemini_fallback)"
+OPENCODE_MODEL="$(model_for opencode_model)"
+CODEX_MODEL="$(model_for codex_model)"
+
 # ─── Detect CLIs + skill assignment ───────────────────────────────
 declare -A AVAILABLE=()
-[ -x "$(command -v claude)"   ] && AVAILABLE[claude]=1
-[ -x "$(command -v gemini)"   ] && AVAILABLE[gemini]=1
-[ -x "$(command -v codex)"    ] && AVAILABLE[codex]=1
-[ -x "$(command -v opencode)" ] && AVAILABLE[opencode]=1
+# Claude is HARD-BLOCKED unless --include-claude is passed AND cap > 0
+if [ "$INCLUDE_CLAUDE" = "1" ] && [ "$(cap_for claude)" -gt 0 ] && [ -x "$(command -v claude)" ]; then
+  AVAILABLE[claude]=1
+fi
+[ "$(cap_for gemini)"   -gt 0 ] && [ -x "$(command -v gemini)"   ] && AVAILABLE[gemini]=1
+[ "$(cap_for codex)"    -gt 0 ] && [ -x "$(command -v codex)"    ] && AVAILABLE[codex]=1
+[ "$(cap_for opencode)" -gt 0 ] && [ -x "$(command -v opencode)" ] && AVAILABLE[opencode]=1
 
-# Skills per CLI (matches cqc dispatch matrix)
+# Skills per CLI — claude's skills (d4,d6,d13) reassigned to local CLIs
 declare -A SKILLS=(
   [claude]="d4 d6 d13"
-  [gemini]="d12 d8 d9"
-  [opencode]="d1 d3 d11 d14 d15"
+  [gemini]="d12 d8 d9 d6 d13"
+  [opencode]="d1 d3 d11 d14 d15 d4"
   [codex]="d2 d5 d7 d10"
 )
 
@@ -147,16 +168,29 @@ spawn_cli() {
     claude)
       cmd=(claude --print --dangerously-skip-permissions --model claude-opus-4-7 "$prompt") ;;
     gemini)
-      cmd=(gemini --yolo --approval-mode yolo -m gemini-3.1-pro-preview -p "$prompt") ;;
+      # Try primary; on quota error, the wrapper retries with Flash (handled at call site).
+      cmd=(gemini --yolo --approval-mode yolo -m "${GEMINI_PRIMARY:-gemini-3.1-pro-preview}" -p "$prompt") ;;
     codex)
       cmd=(codex exec --dangerously-bypass-approvals-and-sandbox "$prompt") ;;
     opencode)
-      cmd=(opencode run --dangerously-skip-permissions "$prompt") ;;
+      cmd=(opencode run --dangerously-skip-permissions --model "${OPENCODE_MODEL:-opencode-go/glm-5.1}" "$prompt") ;;
   esac
 
   echo "${C_DIM}  spawning $cli (pid pending)…${C_RST}"
   ( timeout --kill-after=10 "$TIMEOUT" "${cmd[@]}" > "$log" 2>&1
     EXIT=$?
+
+    # Gemini Flash fallback: retry on quota-exhaust (RESOURCE_EXHAUSTED, 429, "quota")
+    if [ "$cli" = "gemini" ] && [ $EXIT -ne 0 ] && [ $EXIT -ne 124 ]; then
+      if grep -qiE "RESOURCE_EXHAUSTED|429|quota|exceeded|rate.?limit" "$log" 2>/dev/null; then
+        echo "" >> "$log"
+        echo "── [auto-fallback] retry with $GEMINI_FALLBACK (unmetered) ──" >> "$log"
+        timeout --kill-after=10 "$TIMEOUT" gemini --yolo --approval-mode yolo \
+          -m "${GEMINI_FALLBACK:-gemini-2.5-flash}" -p "$prompt" >> "$log" 2>&1
+        EXIT=$?
+      fi
+    fi
+
     if [ $EXIT -eq 0 ]; then
       echo "ok|$cli|$EXIT" > "$RUN_DIR/logs/${cli}.status"
     elif [ $EXIT -eq 124 ]; then

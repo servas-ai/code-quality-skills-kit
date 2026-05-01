@@ -9,3 +9,7 @@ audit-reports/
 
 # Sandbox snapshots from local testing
 .sandbox-runs/
+
+# Python bytecode
+bin/__pycache__/
+*.pyc
