@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 
 ROOT = os.environ.get("CQC_ROOT", os.getcwd())
-PORT = int(os.environ.get("CQC_PORT", "7331"))
+PORT = int(os.environ.get("CQC_PORT", "4020"))
 VERSION = os.environ.get("CQC_VERSION", "v3.13")
 CLIS = ("claude", "gemini", "opencode", "codex")
 
@@ -314,10 +314,9 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
-    httpd = ThreadedServer(("127.0.0.1", PORT), Handler)
-    print(f"\n  cqc-ui {VERSION}  ROOT={ROOT}")
-    print(f"  open http://localhost:{PORT}")
-    print(f"  Ctrl-C to stop\n")
+    bind = os.environ.get("CQC_BIND", "0.0.0.0")
+    httpd = ThreadedServer((bind, PORT), Handler)
+    print(f"  cqc-ui {VERSION}  bind={bind}:{PORT}  root={ROOT}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

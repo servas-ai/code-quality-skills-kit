@@ -9,9 +9,10 @@
 set -euo pipefail
 umask 077
 
-PORT="${CQC_UI_PORT:-7331}"
+PORT="${CQC_UI_PORT:-4020}"
 TARGET="."
-VERSION="v3.13"
+VERSION="v3.14"
+BIND="${CQC_UI_BIND:-0.0.0.0}"   # bind to all interfaces incl. Tailscale
 
 while [ "${1:-}" != "" ]; do
   case "$1" in
@@ -54,6 +55,26 @@ fi
 
 export CQC_ROOT="$ABS"
 export CQC_PORT="$PORT"
+export CQC_BIND="$BIND"
 export CQC_VERSION="$VERSION"
+
+# Pre-flight: detect Tailscale and print all reachable URLs
+if command -v tailscale >/dev/null 2>&1; then
+  TS_HOST=$(tailscale status --self --json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("Self",{}).get("DNSName","").rstrip("."))' 2>/dev/null)
+  TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
+fi
+
+cat <<URLS
+
+  cqc-ui $VERSION · serving $ABS/audit-reports/
+
+  ▸ Local:      http://localhost:$PORT
+  ▸ LAN:        http://$(hostname -I | awk '{print $1}'):$PORT
+${TS_HOST:+  ▸ Tailscale:  http://${TS_HOST}:$PORT}
+${TS_IP:+  ▸ Tailscale-IP: http://${TS_IP}:$PORT}
+
+  Press Ctrl-C to stop.
+
+URLS
 
 exec python3 "$SERVER"
