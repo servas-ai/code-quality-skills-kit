@@ -111,6 +111,10 @@ scope_blocklist: [billing, admin]
 - [Code Auditor (Grade A)](https://www.skillsdirectory.com/skills/mhattingpete-code-auditor) — 6-dimension rubric
 - [FlowX audit-completeness](https://www.flowx.ai/ai-agents/audit-trail-completeness-verifier) + [auditable agentic AI (ACM 2025)](https://dl.acm.org/doi/10.1145/3759355.3759356) — 99 %-coverage / hash-linked entry patterns
 
+## Live demo
+
+[**servas-ai.github.io/code-quality-skills-kit**](https://servas-ai.github.io/code-quality-skills-kit/) — interactive landing page with live demo, install tabs, configure form.
+
 ## Status
 
 v3.2 · End-to-end tested against a real Next.js codebase (211 files, 3 parallel sub-agents, all findings traced to real `file:line` citations, Critical-Cap scoring verified).

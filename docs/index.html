@@ -1,0 +1,1749 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CQC · Code Quality Skills Kit · Multi-Agent Audit for Claude · Gemini · OpenCode · Codex</title>
+  <meta name="description" content="Self-bootstrapping multi-agent code-quality audit kit. One prompt, any codebase, 15 dimensions running in parallel across 4 AI CLIs.">
+  <meta property="og:title" content="Code Quality Skills Kit · v3.6">
+  <meta property="og:description" content="Multi-agent code-quality audit. 15 dimensions. Any codebase. Parallel sub-agents across Claude, Gemini, OpenCode, Codex.">
+  <meta property="og:url" content="https://servas-ai.github.io/code-quality-skills-kit/">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#0a0d12">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>⚡</text></svg>">
+  <style>
+    *,*::before,*::after { box-sizing: border-box; }
+    :root {
+      --bg: #0a0d12;
+      --bg-elevated: #14181f;
+      --border: #2a2f3b;
+      --fg: #e6e8eb;
+      --muted: #8b93a1;
+      --accent: #00d9ff;
+      --accent-2: #ff5566;
+      --success: #4ade80;
+      --warning: #ffc857;
+      --critical: #ff5566;
+      --mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--mono);
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .skip-link { position: absolute; top: -100px; left: 0; padding: 8px 16px; background: var(--accent); color: var(--bg); z-index: 100; text-decoration: none; }
+    .skip-link:focus { top: 0; }
+    .topnav {
+      position: sticky; top: 0; z-index: 50;
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      background: rgba(10,13,18,0.75);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex; gap: 24px; align-items: center;
+      font-size: 14px;
+    }
+    .topnav a { color: var(--muted); text-decoration: none; transition: color 0.15s; }
+    .topnav a:hover, .topnav a:focus-visible { color: var(--fg); }
+    .topnav .logo { color: var(--accent); font-weight: 700; letter-spacing: 0.08em; margin-right: auto; }
+    .topnav .github { color: var(--accent); margin-left: auto; }
+    section { padding: 64px 24px; max-width: 1200px; margin: 0 auto; }
+    section h2 { font-size: 28px; font-weight: 700; margin: 0 0 32px; letter-spacing: -0.02em; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media (max-width: 600px) {
+      .topnav { gap: 16px; padding: 12px 16px; font-size: 13px; flex-wrap: wrap; }
+      section { padding: 48px 16px; }
+    }
+  </style>
+</head>
+<body>
+<a href="#main" class="skip-link">Skip to content</a>
+
+<nav class="topnav" aria-label="Main navigation">
+  <a class="logo" href="#hero">CQC</a>
+  <a href="#skills">Skills</a>
+  <a href="#install">Install</a>
+  <a href="#demo">Demo</a>
+  <a class="github" href="https://github.com/servas-ai/code-quality-skills-kit" target="_blank" rel="noopener">GitHub →</a>
+</nav>
+
+<main id="main">
+
+<!-- ============ _hero.html ============ -->
+<!-- Hero fragment for code-quality-skills-kit landing page. Drop into any parent index.html. -->
+<section class="hero">
+  <style>
+    .hero {
+      --bg: #0a0d12;
+      --bg-elevated: #14181f;
+      --border: #2a2f3b;
+      --fg: #e6e8eb;
+      --muted: #8b93a1;
+      --accent: #00d9ff;
+      --accent-2: #ff5566;
+      --success: #4ade80;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      min-height: 100vh;
+      padding: 1.5rem clamp(1rem, 4vw, 3rem) 4rem;
+      display: flex;
+      flex-direction: column;
+      box-sizing: border-box;
+      background-image:
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(0, 217, 255, 0.10), transparent 60%),
+        radial-gradient(ellipse 60% 40% at 80% 100%, rgba(255, 85, 102, 0.06), transparent 60%);
+    }
+    .hero * { box-sizing: border-box; }
+    .hero a { color: inherit; text-decoration: none; }
+
+    /* Top nav */
+    .hero__nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .hero__logo {
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      color: var(--accent);
+      font-size: 1rem;
+      text-shadow: 0 0 8px rgba(0, 217, 255, 0.4);
+    }
+    .hero__links {
+      display: flex;
+      gap: clamp(0.75rem, 2.5vw, 1.75rem);
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      flex-wrap: wrap;
+    }
+    .hero__links a {
+      color: var(--muted);
+      font-size: 0.875rem;
+      transition: color 0.15s ease;
+      padding: 0.25rem 0;
+    }
+    .hero__links a:hover,
+    .hero__links a:focus-visible {
+      color: var(--accent);
+      outline: none;
+    }
+    .hero__links a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 4px;
+      border-radius: 2px;
+    }
+
+    /* Body */
+    .hero__body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: clamp(2rem, 6vw, 4rem) 0 2rem;
+      gap: 2rem;
+    }
+
+    /* ASCII banner */
+    .hero__banner {
+      display: inline-block;
+      margin: 0;
+      padding: 0;
+      color: var(--accent);
+      font-family: inherit;
+      font-size: clamp(0.5rem, 1.4vw, 0.85rem);
+      line-height: 1.25;
+      white-space: pre;
+      text-shadow: 0 0 8px rgba(0, 217, 255, 0.3);
+      overflow-x: auto;
+      max-width: 100%;
+      letter-spacing: 0;
+    }
+
+    /* Tagline + subtitle */
+    .hero__tagline {
+      color: var(--muted);
+      font-size: 0.875rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin: 0;
+    }
+    .hero__tagline .dot { color: var(--accent); }
+    .hero__subtitle {
+      color: var(--fg);
+      font-size: clamp(1rem, 2.5vw, 1.4rem);
+      font-weight: 500;
+      max-width: 56ch;
+      line-height: 1.5;
+      margin: 0;
+    }
+
+    /* CTAs */
+    .hero__ctas {
+      display: flex;
+      gap: 0.875rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .hero__btn {
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 0.85rem 1.4rem;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: transform 0.12s ease, box-shadow 0.15s ease, background 0.15s ease, color 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      letter-spacing: 0.02em;
+    }
+    .hero__btn--primary {
+      background: var(--accent);
+      color: var(--bg);
+      box-shadow: 0 0 0 0 rgba(0, 217, 255, 0.5);
+    }
+    .hero__btn--primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px -8px rgba(0, 217, 255, 0.6);
+    }
+    .hero__btn--primary.is-copied { background: var(--success); }
+    .hero__btn--secondary {
+      background: transparent;
+      color: var(--fg);
+      border-color: var(--border);
+    }
+    .hero__btn--secondary:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .hero__btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    /* Stats grid */
+    .hero__stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.75rem;
+      width: 100%;
+      max-width: 720px;
+      margin-top: 1rem;
+    }
+    .hero__stat {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 0.75rem;
+      text-align: center;
+    }
+    .hero__stat-value {
+      color: var(--accent);
+      font-size: clamp(1.1rem, 2.5vw, 1.6rem);
+      font-weight: 700;
+      line-height: 1;
+      margin-bottom: 0.35rem;
+    }
+    .hero__stat-label {
+      color: var(--muted);
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    /* Mobile */
+    @media (max-width: 640px) {
+      .hero__ctas { flex-direction: column; align-items: stretch; width: 100%; max-width: 320px; }
+      .hero__btn { justify-content: center; }
+      .hero__stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .hero__banner { font-size: clamp(0.42rem, 2.2vw, 0.7rem); }
+    }
+    @media (max-width: 380px) {
+      .hero__banner { font-size: 0.4rem; }
+    }
+  </style>
+
+  <nav class="hero__nav" aria-label="Primary">
+    <a class="hero__logo" href="#top" aria-label="Code Quality Checker home">CQC</a>
+    <ul class="hero__links">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#skills">Skills</a></li>
+      <li><a href="#clis">CLIs</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="https://github.com/servas-ai/code-quality-skills-kit" rel="noopener">GitHub</a></li>
+    </ul>
+  </nav>
+
+  <div class="hero__body">
+    <pre class="hero__banner" aria-label="Code Quality Skills Kit banner">  ┌──────────────────────────────────────────────────────────────────────┐
+  │                                                                      │
+  │     ░█▀▀░░█▀█░░█▀█       Code Quality Skills Kit  ·  v3.6           │
+  │     ░█░░░░█░█░░█░█       ────────────────────────────────────       │
+  │     ░▀▀▀░░▀▀▀░░▀▀▀       Multi-CLI · 15 dimensions · 99% coverage   │
+  │                          Critical-Cap scoring · token-optimised      │
+  │                                                                      │
+  │     ▸ One prompt · Any codebase · Parallel sub-agents                │
+  │     ▸ github.com/servas-ai/code-quality-skills-kit  ·  MIT           │
+  │                                                                      │
+  └──────────────────────────────────────────────────────────────────────┘</pre>
+
+    <p class="hero__tagline">Multi-Agent Code Quality Audit Kit <span class="dot">·</span> v3.6</p>
+    <h1 class="hero__subtitle">One prompt. Any codebase. Parallel sub-agents across Claude, Gemini, OpenCode, Codex.</h1>
+
+    <div class="hero__ctas">
+      <button id="cqc-install-btn" class="hero__btn hero__btn--primary" type="button"
+              aria-label="Copy install command to clipboard"
+              data-install="curl -sSL https://raw.githubusercontent.com/servas-ai/code-quality-skills-kit/main/install.sh | sh">
+        <span class="hero__btn-label">Install in 1 line</span>
+      </button>
+      <a class="hero__btn hero__btn--secondary"
+         href="https://github.com/servas-ai/code-quality-skills-kit"
+         rel="noopener"
+         aria-label="View source on GitHub">
+        View on GitHub →
+      </a>
+    </div>
+
+    <dl class="hero__stats" aria-label="Project stats">
+      <div class="hero__stat"><dt class="hero__stat-value">15</dt><dd class="hero__stat-label">Dimensions</dd></div>
+      <div class="hero__stat"><dt class="hero__stat-value">4</dt><dd class="hero__stat-label">CLIs Supported</dd></div>
+      <div class="hero__stat"><dt class="hero__stat-value">99%</dt><dd class="hero__stat-label">Coverage Gate</dd></div>
+      <div class="hero__stat"><dt class="hero__stat-value">MIT</dt><dd class="hero__stat-label">License</dd></div>
+    </dl>
+  </div>
+
+  <script>
+    (function () {
+      var btn = document.getElementById('cqc-install-btn');
+      if (!btn) return;
+      var label = btn.querySelector('.hero__btn-label');
+      var original = label.textContent;
+      var resetTimer = null;
+
+      function showCopied() {
+        label.textContent = '✓ Copied';
+        btn.classList.add('is-copied');
+        if (resetTimer) clearTimeout(resetTimer);
+        resetTimer = setTimeout(function () {
+          label.textContent = original;
+          btn.classList.remove('is-copied');
+        }, 2000);
+      }
+
+      function fallbackCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+
+      btn.addEventListener('click', function () {
+        var cmd = btn.getAttribute('data-install') || '';
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(cmd).then(showCopied, function () {
+            fallbackCopy(cmd); showCopied();
+          });
+        } else {
+          fallbackCopy(cmd); showCopied();
+        }
+      });
+    })();
+  </script>
+</section>
+
+<!-- ============ _skills.html ============ -->
+<!--
+  code-quality-skills-kit — CLI compatibility matrix + 15 Skills overview
+  Self-contained HTML fragment. Inline CSS scoped to .skills-section.
+  No external dependencies. Vanilla JS for filter only. Expand uses <details>.
+-->
+<section class="skills-section" aria-labelledby="skills-heading">
+  <style>
+    /* Scoped tokens — mirror hero palette */
+    .skills-section {
+      --bg: #0a0d12;
+      --bg-elevated: #14181f;
+      --border: #2a2f3b;
+      --fg: #e6e8eb;
+      --muted: #8b93a1;
+      --accent: #00d9ff;
+      --accent-2: #ff5566;
+      --success: #4ade80;
+
+      background: var(--bg);
+      color: var(--fg);
+      font-family: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", monospace;
+      padding: 4rem 1.25rem;
+      line-height: 1.55;
+    }
+    .skills-section *,
+    .skills-section *::before,
+    .skills-section *::after { box-sizing: border-box; }
+
+    .skills-section .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    /* Headings */
+    .skills-section h2 {
+      font-size: clamp(1.5rem, 3vw, 2rem);
+      letter-spacing: -0.01em;
+      margin: 0 0 0.5rem;
+      color: var(--fg);
+    }
+    .skills-section h2 .marker {
+      color: var(--accent);
+      margin-right: 0.5rem;
+    }
+    .skills-section .lede {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin: 0 0 2rem;
+      max-width: 64ch;
+    }
+
+    /* ─── Section 1 · CLI matrix ───────────────────────────────────── */
+    .cli-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 1rem;
+      margin-bottom: 4rem;
+    }
+    .cli-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.25rem;
+      transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      will-change: transform;
+    }
+    .cli-card:hover,
+    .cli-card:focus-within {
+      transform: translateY(-2px);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(0, 217, 255, 0.18), 0 8px 24px -12px rgba(0, 217, 255, 0.4);
+    }
+    .cli-card .head {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .cli-card .glyph {
+      font-size: 1.5rem;
+      line-height: 1;
+      color: var(--accent);
+      filter: drop-shadow(0 0 6px rgba(0, 217, 255, 0.35));
+    }
+    .cli-card .name {
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .cli-card .strength {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin: 0 0 0.85rem;
+      min-height: 2.4em;
+    }
+    .cli-card .skill-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin-bottom: 0.85rem;
+    }
+    .cli-card .skill-badges span {
+      font-size: 0.72rem;
+      padding: 0.2rem 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--fg);
+      background: rgba(0, 217, 255, 0.04);
+    }
+    .cli-card .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .cli-card .status::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 6px var(--success);
+      opacity: 0.6;
+    }
+
+    /* ─── Section 2 · 15 dimensions ───────────────────────────────── */
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .filter-bar button {
+      font-family: inherit;
+      font-size: 0.8rem;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      padding: 0.35rem 0.85rem;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .filter-bar button:hover { color: var(--fg); border-color: var(--accent); }
+    .filter-bar button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .filter-bar button[aria-pressed="true"] {
+      color: var(--bg);
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .phase-divider {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin: 1.25rem 0 0.25rem;
+    }
+    .phase-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .skills-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 0.85rem;
+    }
+
+    .skill-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      will-change: transform;
+    }
+    .skill-card[hidden] { display: none; }
+    .skill-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(0, 217, 255, 0.18), 0 8px 24px -12px rgba(0, 217, 255, 0.4);
+    }
+    .skill-card summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 1rem 1.1rem;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 0.75rem;
+      outline: none;
+    }
+    .skill-card summary::-webkit-details-marker { display: none; }
+    .skill-card summary:focus-visible {
+      box-shadow: inset 0 0 0 2px var(--accent);
+      border-radius: 6px;
+    }
+    .skill-card .dim {
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      min-width: 2.5ch;
+    }
+    .skill-card .title {
+      font-size: 0.95rem;
+      color: var(--fg);
+    }
+    .skill-card .weight {
+      font-size: 0.7rem;
+      padding: 0.18rem 0.45rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      letter-spacing: 0.02em;
+      font-variant-numeric: tabular-nums;
+    }
+    /* Weight bands */
+    .skill-card .weight.w-hi   { color: var(--accent);  border-color: rgba(0,217,255,0.35); }
+    .skill-card .weight.w-mid  { color: var(--fg);      border-color: var(--border); }
+    .skill-card .weight.w-lo   { color: var(--muted);   border-color: var(--border); }
+    .skill-card .weight.w-dim  { color: var(--muted);   opacity: 0.55; border-color: var(--border); }
+
+    /* Expand animation — using grid-template-rows to avoid known max-height
+       quirks while keeping smooth transition. */
+    .skill-card .skill-detail-wrap {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.3s ease;
+    }
+    .skill-card[open] .skill-detail-wrap { grid-template-rows: 1fr; }
+    .skill-card .skill-detail-inner { overflow: hidden; }
+
+    .skill-card .skill-detail {
+      padding: 0 1.1rem 1.1rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .skill-card .skill-detail p {
+      margin: 0.85rem 0 0.6rem;
+      color: var(--fg);
+    }
+    .skill-card .skill-detail ul {
+      margin: 0;
+      padding-left: 1.15rem;
+      list-style: square;
+    }
+    .skill-card .skill-detail li { margin-bottom: 0.25rem; }
+    .skill-card .skill-detail li::marker { color: var(--accent-2); }
+    .skill-card .skill-detail .tags {
+      margin-top: 0.85rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+    }
+    .skill-card .skill-detail .tags span {
+      font-size: 0.68rem;
+      padding: 0.15rem 0.45rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+    }
+
+    /* Caret indicator */
+    .skill-card summary .caret {
+      color: var(--muted);
+      transition: transform 0.2s ease;
+      grid-column: 3;
+      margin-left: 0.5rem;
+      font-size: 0.7rem;
+    }
+    .skill-card[open] summary .caret { transform: rotate(90deg); color: var(--accent); }
+
+    /* Mobile */
+    @media (max-width: 480px) {
+      .skills-section { padding: 2.5rem 0.85rem; }
+      .cli-grid,
+      .skills-grid { grid-template-columns: 1fr; }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      .skills-section *,
+      .skills-section *::before,
+      .skills-section *::after {
+        transition: none !important;
+        animation: none !important;
+      }
+    }
+  </style>
+
+  <div class="container">
+    <!-- ─── Section 1 ─────────────────────────────────────────── -->
+    <header>
+      <h2 id="skills-heading"><span class="marker">$</span>Multi-CLI parallel dispatch</h2>
+      <p class="lede">
+        Each CLI plays to its strengths. The kit auto-detects what is installed
+        and dispatches the 15 audit dimensions across them in parallel.
+      </p>
+    </header>
+
+    <div class="cli-grid" role="list">
+      <article class="cli-card" role="listitem" aria-label="Claude CLI">
+        <div class="head">
+          <span class="glyph" aria-hidden="true">◆</span>
+          <span class="name">Claude</span>
+        </div>
+        <p class="strength">Architecture · Security · Code Review</p>
+        <div class="skill-badges" aria-label="Assigned skills">
+          <span>d4</span><span>d6</span><span>d13</span>
+        </div>
+        <span class="status" aria-label="Detection status">Detect on install</span>
+      </article>
+
+      <article class="cli-card" role="listitem" aria-label="Gemini CLI">
+        <div class="head">
+          <span class="glyph" aria-hidden="true">✦</span>
+          <span class="name">Gemini</span>
+        </div>
+        <p class="strength">Large-context · Deps · Docs</p>
+        <div class="skill-badges" aria-label="Assigned skills">
+          <span>d12</span><span>d8</span><span>d9</span>
+        </div>
+        <span class="status" aria-label="Detection status">Detect on install</span>
+      </article>
+
+      <article class="cli-card" role="listitem" aria-label="OpenCode CLI">
+        <div class="head">
+          <span class="glyph" aria-hidden="true">▣</span>
+          <span class="name">OpenCode</span>
+        </div>
+        <p class="strength">Bulk grep · Fast iteration</p>
+        <div class="skill-badges" aria-label="Assigned skills">
+          <span>d1</span><span>d3</span><span>d11</span><span>d14</span><span>d15</span>
+        </div>
+        <span class="status" aria-label="Detection status">Detect on install</span>
+      </article>
+
+      <article class="cli-card" role="listitem" aria-label="Codex CLI">
+        <div class="head">
+          <span class="glyph" aria-hidden="true">◈</span>
+          <span class="name">Codex</span>
+        </div>
+        <p class="strength">Types · Tests · Performance</p>
+        <div class="skill-badges" aria-label="Assigned skills">
+          <span>d2</span><span>d5</span><span>d7</span><span>d10</span>
+        </div>
+        <span class="status" aria-label="Detection status">Detect on install</span>
+      </article>
+    </div>
+
+    <!-- ─── Section 2 ─────────────────────────────────────────── -->
+    <header>
+      <h2><span class="marker">$</span>15 Audit Dimensions</h2>
+      <p class="lede">
+        Click any dimension to expand its checks. Filter by audit phase to
+        focus on what matters this iteration.
+      </p>
+    </header>
+
+    <div class="filter-bar" role="toolbar" aria-label="Filter dimensions by phase">
+      <button type="button" data-filter="all" aria-pressed="true">All</button>
+      <button type="button" data-filter="quality" aria-pressed="false">Quality</button>
+      <button type="button" data-filter="security" aria-pressed="false">Security</button>
+      <button type="button" data-filter="ux" aria-pressed="false">UX</button>
+      <button type="button" data-filter="build" aria-pressed="false">Build</button>
+    </div>
+
+    <div class="skills-grid" id="skills-grid">
+
+      <div class="phase-divider" aria-hidden="true">Quality</div>
+
+      <details class="skill-card" data-tags="quality">
+        <summary>
+          <span class="dim">d1</span>
+          <span class="title">Correctness &amp; Invariants</span>
+          <span class="weight w-hi">w15</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Catches the bugs that ship.</p>
+            <ul>
+              <li>Race conditions in async flows</li>
+              <li>Swallowed catches (empty <code>catch {}</code>)</li>
+              <li><code>as any</code> escape hatches</li>
+              <li>Broken project-defined invariants</li>
+            </ul>
+            <div class="tags"><span>invariants</span><span>async</span><span>types</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="quality">
+        <summary>
+          <span class="dim">d3</span>
+          <span class="title">Tests</span>
+          <span class="weight w-hi">w12</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Validates that tests actually run and cover changes.</p>
+            <ul>
+              <li>Pass / fail counts from real runs</li>
+              <li><code>.skip</code> / <code>.todo</code> / <code>.only</code> inventory</li>
+              <li>Missing tests for changed modules</li>
+            </ul>
+            <div class="tags"><span>tests</span><span>ci</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="quality build">
+        <summary>
+          <span class="dim">d6</span>
+          <span class="title">Architecture</span>
+          <span class="weight w-mid">w10</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Keeps the codebase maintainable as it grows.</p>
+            <ul>
+              <li>God-files (&gt;300 LOC)</li>
+              <li>Layer violations</li>
+              <li>Circular dependencies</li>
+              <li>Barrel-file hygiene</li>
+            </ul>
+            <div class="tags"><span>invariants</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="quality">
+        <summary>
+          <span class="dim">d8</span>
+          <span class="title">Dead code &amp; Tech debt</span>
+          <span class="weight w-mid">w8</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Surfaces what should be deleted.</p>
+            <ul>
+              <li>Unused exports across the graph</li>
+              <li>Stale TODOs (&gt;30 days)</li>
+              <li>Placeholder files / scaffold leftovers</li>
+            </ul>
+            <div class="tags"><span>dead-code</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <div class="phase-divider" aria-hidden="true">Types &amp; Build</div>
+
+      <details class="skill-card" data-tags="quality build">
+        <summary>
+          <span class="dim">d2</span>
+          <span class="title">Type Safety</span>
+          <span class="weight w-hi">w12</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Trust the compiler, then check what it can&rsquo;t.</p>
+            <ul>
+              <li>Real <code>tsc</code> error counts (not estimates)</li>
+              <li>Missing strict flags</li>
+              <li><code>any</code> inventory</li>
+              <li><code>@ts-ignore</code> debt</li>
+            </ul>
+            <div class="tags"><span>types</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="build">
+        <summary>
+          <span class="dim">d10</span>
+          <span class="title">CI Health</span>
+          <span class="weight w-lo">w5</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>What does CI actually say right now?</p>
+            <ul>
+              <li>Exit codes for typecheck / test / build / lint</li>
+              <li>GitHub Actions success rate (last N runs)</li>
+            </ul>
+            <div class="tags"><span>ci</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="build">
+        <summary>
+          <span class="dim">d12</span>
+          <span class="title">Dependencies</span>
+          <span class="weight w-lo">w6</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Audits the supply chain you actually depend on.</p>
+            <ul>
+              <li><code>pnpm audit</code> / equivalent</li>
+              <li>Outdated &amp; duplicate packages</li>
+              <li>License risk surface</li>
+            </ul>
+            <div class="tags"><span>deps</span><span>secrets</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <div class="phase-divider" aria-hidden="true">Performance</div>
+
+      <details class="skill-card" data-tags="quality">
+        <summary>
+          <span class="dim">d5</span>
+          <span class="title">Performance</span>
+          <span class="weight w-mid">w10</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>The slow parts, ranked.</p>
+            <ul>
+              <li>First Load JS budget</li>
+              <li><code>useEffect</code> heat map</li>
+              <li>N+1 query patterns</li>
+              <li>Unscoped imports &amp; missing memoization</li>
+            </ul>
+            <div class="tags"><span>perf</span><span>bundle</span><span>async</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="quality">
+        <summary>
+          <span class="dim">d13</span>
+          <span class="title">Cache keys</span>
+          <span class="weight w-mid">w8</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>The most common source of stale UI.</p>
+            <ul>
+              <li>React-Query key-factory consistency</li>
+              <li>Invalidation drift across mutations</li>
+              <li><code>staleTime</code> audit</li>
+            </ul>
+            <div class="tags"><span>cache</span><span>async</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <div class="phase-divider" aria-hidden="true">UX &amp; Content</div>
+
+      <details class="skill-card" data-tags="ux">
+        <summary>
+          <span class="dim">d7</span>
+          <span class="title">Accessibility</span>
+          <span class="weight w-mid">w10</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Keyboard users, screen readers, and contrast.</p>
+            <ul>
+              <li><code>&lt;div onClick&gt;</code> without keyboard handler</li>
+              <li>Missing focus rings</li>
+              <li>Alt text &amp; form labels</li>
+            </ul>
+            <div class="tags"><span>a11y</span><span>keyboard</span><span>contrast</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="ux">
+        <summary>
+          <span class="dim">d9</span>
+          <span class="title">Documentation</span>
+          <span class="weight w-lo">w6</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Docs are a feature; drift is a bug.</p>
+            <ul>
+              <li>README freshness vs <code>main</code></li>
+              <li>Scope drift between README &amp; code</li>
+              <li>JSDoc on public API</li>
+              <li>Broken markdown links</li>
+            </ul>
+            <div class="tags"><span>docs</span><span>invariants</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="ux">
+        <summary>
+          <span class="dim">d11</span>
+          <span class="title">i18n</span>
+          <span class="weight w-lo">w6</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Only runs when an extraction policy is active.</p>
+            <ul>
+              <li>Hardcoded UI strings escaping the catalog</li>
+            </ul>
+            <div class="tags"><span>i18n</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="ux">
+        <summary>
+          <span class="dim">d14</span>
+          <span class="title">CSS tokens</span>
+          <span class="weight w-dim">w4</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Tokens win over ad-hoc values, every time.</p>
+            <ul>
+              <li>Tailwind arbitrary values <code>[#abc]</code></li>
+              <li>Raw hex outside the token layer</li>
+              <li>Dark-mode parity gaps</li>
+            </ul>
+            <div class="tags"><span>a11y</span><span>contrast</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <div class="phase-divider" aria-hidden="true">Security</div>
+
+      <details class="skill-card" data-tags="security">
+        <summary>
+          <span class="dim">d4</span>
+          <span class="title">Security &amp; Privacy</span>
+          <span class="weight w-hi">w12</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>The patterns that get apps owned.</p>
+            <ul>
+              <li>Hardcoded secrets &amp; API keys</li>
+              <li><code>eval</code>, <code>innerHTML</code> sinks</li>
+              <li>Env var leaks to client bundle</li>
+              <li><code>.gitignore</code> hygiene</li>
+            </ul>
+            <div class="tags"><span>secrets</span><span>auth</span><span>xss</span><span>injection</span></div>
+          </div>
+        </div></div>
+      </details>
+
+      <details class="skill-card" data-tags="security">
+        <summary>
+          <span class="dim">d15</span>
+          <span class="title">Feature flags</span>
+          <span class="weight w-dim">w4</span>
+          <span class="caret" aria-hidden="true">▶</span>
+        </summary>
+        <div class="skill-detail-wrap"><div class="skill-detail-inner">
+          <div class="skill-detail">
+            <p>Old flags are quiet liabilities.</p>
+            <ul>
+              <li>Stale flags (&gt;90 days)</li>
+              <li>Half-rolled-out flags</li>
+              <li>Dead branches behind permanently-off flags</li>
+            </ul>
+            <div class="tags"><span>dead-code</span></div>
+          </div>
+        </div></div>
+      </details>
+
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var section = document.currentScript.closest('.skills-section');
+      if (!section) return;
+      var buttons = section.querySelectorAll('.filter-bar button');
+      var cards = section.querySelectorAll('.skill-card');
+      var dividers = section.querySelectorAll('.phase-divider');
+
+      function applyFilter(filter) {
+        cards.forEach(function (card) {
+          var tags = (card.getAttribute('data-tags') || '').split(/\s+/);
+          var match = filter === 'all' || tags.indexOf(filter) !== -1;
+          card.hidden = !match;
+        });
+        // Hide dividers whose phase has no visible cards.
+        dividers.forEach(function (divider) {
+          var sib = divider.nextElementSibling;
+          var anyVisible = false;
+          while (sib && !sib.classList.contains('phase-divider')) {
+            if (sib.classList.contains('skill-card') && !sib.hidden) {
+              anyVisible = true;
+              break;
+            }
+            sib = sib.nextElementSibling;
+          }
+          divider.hidden = !anyVisible;
+        });
+      }
+
+      buttons.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          buttons.forEach(function (b) { b.setAttribute('aria-pressed', 'false'); });
+          btn.setAttribute('aria-pressed', 'true');
+          applyFilter(btn.getAttribute('data-filter') || 'all');
+        });
+      });
+    })();
+  </script>
+</section>
+
+<!-- ============ _demo.html ============ -->
+<!-- Install + Configure + Live Demo fragment for code-quality-skills-kit landing page. -->
+<section class="demo" aria-labelledby="demo-title">
+  <style>
+    .demo {
+      --bg: #0a0d12;
+      --bg-elevated: #14181f;
+      --bg-deep: #07090d;
+      --border: #2a2f3b;
+      --border-soft: #1d2230;
+      --fg: #e6e8eb;
+      --muted: #8b93a1;
+      --accent: #00d9ff;
+      --success: #4ade80;
+      --warning: #ffc857;
+      --critical: #ff5566;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      padding: 4rem clamp(1rem, 4vw, 3rem);
+      display: flex;
+      flex-direction: column;
+      gap: 4rem;
+      box-sizing: border-box;
+    }
+    .demo * { box-sizing: border-box; }
+    .demo__head { display: flex; flex-direction: column; gap: 0.5rem; }
+    .demo__eyebrow { color: var(--accent); font-size: 0.75rem; letter-spacing: 0.25em; text-transform: uppercase; }
+    .demo__title { font-size: clamp(1.75rem, 3.5vw, 2.5rem); margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+    .demo__subtitle { color: var(--muted); font-size: 0.95rem; margin: 0; max-width: 60ch; }
+
+    .demo__section { display: flex; flex-direction: column; gap: 1.5rem; }
+    .demo__section-title {
+      display: flex; align-items: baseline; gap: 0.75rem;
+      font-size: 1.25rem; font-weight: 600; margin: 0;
+      letter-spacing: -0.005em;
+    }
+    .demo__section-tag {
+      color: var(--accent); font-size: 0.7rem; letter-spacing: 0.2em;
+      padding: 0.15rem 0.5rem; border: 1px solid var(--accent); border-radius: 3px;
+      font-weight: 500; opacity: 0.85;
+    }
+
+    /* ========================================================== */
+    /* Subsection A: Install tabs                                  */
+    /* ========================================================== */
+    .install-tabs { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .install-tabs__radio { position: absolute; opacity: 0; pointer-events: none; }
+    .install-tabs__nav { display: flex; border-bottom: 1px solid var(--border); background: var(--bg-deep); flex-wrap: wrap; }
+    .install-tabs__label {
+      flex: 1 1 0; min-width: 12rem; padding: 0.85rem 1rem; cursor: pointer;
+      font-size: 0.85rem; color: var(--muted); border-right: 1px solid var(--border);
+      transition: color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+      display: flex; align-items: center; gap: 0.5rem; user-select: none;
+      position: relative;
+    }
+    .install-tabs__label:last-of-type { border-right: none; }
+    .install-tabs__label:hover { color: var(--fg); background: rgba(0, 217, 255, 0.04); }
+    .install-tabs__radio:focus-visible + .install-tabs__label {
+      outline: 2px solid var(--accent); outline-offset: -2px;
+      color: var(--fg);
+    }
+    .install-tabs__num { color: var(--accent); font-weight: 600; opacity: 0.7; }
+    .install-tabs__panel { display: none; padding: 1.5rem; }
+    .install-tabs__radio:checked + .install-tabs__label {
+      color: var(--accent); background: var(--bg-elevated);
+      box-shadow: inset 0 -2px 0 0 var(--accent);
+    }
+    .install-tabs__radio:checked + .install-tabs__label .install-tabs__num { opacity: 1; }
+    #install-tab-1:checked ~ .install-tabs__panels #install-panel-1,
+    #install-tab-2:checked ~ .install-tabs__panels #install-panel-2,
+    #install-tab-3:checked ~ .install-tabs__panels #install-panel-3 { display: block; }
+
+    .code-block {
+      position: relative; background: var(--bg-deep); border: 1px solid var(--border-soft);
+      border-radius: 6px; padding: 1rem 1rem 1rem 1.25rem;
+      font-size: 0.85rem; line-height: 1.6; color: var(--fg);
+      overflow-x: auto; white-space: pre;
+      font-family: inherit;
+    }
+    .code-block .cmt { color: var(--muted); }
+    .code-block .cmd { color: var(--accent); }
+    .copy-btn {
+      position: absolute; top: 0.5rem; right: 0.5rem;
+      background: var(--bg-elevated); border: 1px solid var(--border);
+      color: var(--muted); font-family: inherit; font-size: 0.75rem;
+      padding: 0.35rem 0.7rem; border-radius: 4px; cursor: pointer;
+      transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+    }
+    .copy-btn:hover { color: var(--fg); border-color: var(--accent); }
+    .copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .copy-btn:active { transform: translateY(1px); }
+    .copy-btn--ok { color: var(--success); border-color: var(--success); }
+
+    /* ========================================================== */
+    /* Subsection B: Configure form                                */
+    /* ========================================================== */
+    .config-grid {
+      display: grid; gap: 1.5rem;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    @media (max-width: 860px) { .config-grid { grid-template-columns: 1fr; } }
+
+    .config-form {
+      background: var(--bg-elevated); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem;
+    }
+    .config-q { display: flex; flex-direction: column; gap: 0.6rem; }
+    .config-q__label {
+      font-size: 0.8rem; color: var(--muted); letter-spacing: 0.05em;
+      display: flex; align-items: center; gap: 0.6rem;
+    }
+    .config-q__num {
+      display: inline-flex; width: 1.4rem; height: 1.4rem; align-items: center; justify-content: center;
+      border: 1px solid var(--accent); color: var(--accent); border-radius: 3px;
+      font-size: 0.7rem; font-weight: 600;
+    }
+    .config-q__title { color: var(--fg); font-size: 0.95rem; }
+
+    .radio-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .radio-pill { position: relative; }
+    .radio-pill input { position: absolute; opacity: 0; pointer-events: none; }
+    .radio-pill span {
+      display: inline-block; padding: 0.5rem 0.85rem; border: 1px solid var(--border);
+      border-radius: 6px; font-size: 0.85rem; color: var(--muted); cursor: pointer;
+      transition: all 150ms ease; user-select: none;
+    }
+    .radio-pill span:hover { color: var(--fg); border-color: var(--accent); }
+    .radio-pill input:checked + span { color: var(--accent); border-color: var(--accent); background: rgba(0, 217, 255, 0.06); }
+    .radio-pill input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .config-select {
+      background: var(--bg-deep); border: 1px solid var(--border); color: var(--fg);
+      font-family: inherit; font-size: 0.9rem; padding: 0.6rem 0.85rem; border-radius: 6px;
+      cursor: pointer; appearance: none;
+      background-image: linear-gradient(45deg, transparent 50%, var(--accent) 50%),
+                        linear-gradient(135deg, var(--accent) 50%, transparent 50%);
+      background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+      background-size: 5px 5px; background-repeat: no-repeat; padding-right: 1.75rem;
+    }
+    .config-select:hover { border-color: var(--accent); }
+    .config-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .checkbox-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .checkbox-pill { position: relative; }
+    .checkbox-pill input { position: absolute; opacity: 0; pointer-events: none; }
+    .checkbox-pill span {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.5rem 0.85rem; border: 1px solid var(--border);
+      border-radius: 6px; font-size: 0.85rem; color: var(--muted); cursor: pointer;
+      transition: all 150ms ease; user-select: none;
+    }
+    .checkbox-pill span::before {
+      content: ''; width: 0.85rem; height: 0.85rem; border-radius: 3px;
+      border: 1px solid currentColor; display: inline-block; flex-shrink: 0;
+      transition: background 150ms ease;
+    }
+    .checkbox-pill span:hover { color: var(--fg); border-color: var(--accent); }
+    .checkbox-pill input:checked + span {
+      color: var(--accent); border-color: var(--accent); background: rgba(0, 217, 255, 0.06);
+    }
+    .checkbox-pill input:checked + span::before {
+      background: var(--accent);
+      box-shadow: inset 0 0 0 2px var(--bg-deep);
+    }
+    .checkbox-pill input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .config-preview {
+      background: var(--bg-elevated); border: 1px solid var(--border);
+      border-radius: 10px; display: flex; flex-direction: column; min-height: 100%;
+    }
+    .config-preview__head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+      background: var(--bg-deep); border-radius: 10px 10px 0 0;
+    }
+    .config-preview__name { font-size: 0.8rem; color: var(--muted); display: flex; align-items: center; gap: 0.5rem; }
+    .config-preview__dot {
+      width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--success);
+      box-shadow: 0 0 6px var(--success);
+    }
+    .config-preview__body {
+      padding: 1rem 1.25rem; flex: 1; overflow-x: auto;
+      font-size: 0.85rem; line-height: 1.7; white-space: pre; color: var(--fg);
+      margin: 0;
+    }
+    .config-preview__body .yk { color: var(--accent); }
+    .config-preview__body .yv { color: var(--success); }
+    .config-preview__body .yc { color: var(--muted); }
+
+    /* ========================================================== */
+    /* Subsection C: Live demo terminal                            */
+    /* ========================================================== */
+    .terminal {
+      position: relative; background: var(--bg-deep); border: 1px solid var(--border);
+      border-radius: 10px; box-shadow: 0 20px 60px -20px rgba(0, 217, 255, 0.15), 0 0 0 1px var(--border-soft);
+      overflow: hidden;
+    }
+    .terminal::before {
+      content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 1;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent 2px,
+        rgba(0, 0, 0, 0.18) 2px,
+        rgba(0, 0, 0, 0.18) 3px
+      );
+      opacity: 0.5;
+      mix-blend-mode: multiply;
+    }
+    .terminal__head {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.65rem 1rem; border-bottom: 1px solid var(--border);
+      background: var(--bg-elevated); position: relative; z-index: 2;
+    }
+    .terminal__dot { width: 0.7rem; height: 0.7rem; border-radius: 50%; }
+    .terminal__dot--r { background: var(--critical); }
+    .terminal__dot--y { background: var(--warning); }
+    .terminal__dot--g { background: var(--success); }
+    .terminal__title {
+      flex: 1; text-align: center; font-size: 0.78rem; color: var(--muted);
+      letter-spacing: 0.05em;
+    }
+    .terminal__replay {
+      background: transparent; border: 1px solid var(--border); color: var(--muted);
+      font-family: inherit; font-size: 0.75rem; padding: 0.3rem 0.75rem;
+      border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; gap: 0.35rem;
+      transition: all 150ms ease;
+    }
+    .terminal__replay:hover { color: var(--accent); border-color: var(--accent); }
+    .terminal__replay:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .terminal__replay:active { transform: translateY(1px); }
+
+    .terminal__body {
+      padding: 1.25rem 1.25rem 1.5rem; font-size: 0.82rem; line-height: 1.55;
+      max-height: 70vh; overflow-y: auto; position: relative; z-index: 2;
+      color: var(--fg); white-space: pre;
+    }
+    .terminal__line { opacity: 0; transform: translateY(2px); }
+    .terminal__line--in { opacity: 1; transform: none; transition: opacity 200ms ease, transform 200ms ease; }
+    .terminal__line--prompt { color: var(--accent); }
+    .terminal__line--dim { color: var(--muted); }
+    .terminal__line--ok { color: var(--success); }
+    .terminal__line--warn { color: var(--warning); }
+    .terminal__line--crit { color: var(--critical); }
+    .terminal__line--accent { color: var(--accent); }
+
+    .pulse { display: inline-block; animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+    .score-block {
+      display: inline-block; margin-top: 0.5rem; padding: 0.5rem 0.85rem;
+      border: 1px solid var(--warning); border-radius: 6px;
+      color: var(--warning); font-size: 0.95rem; font-weight: 600;
+      background: rgba(255, 200, 87, 0.06);
+    }
+    .score-block--g { color: var(--success); border-color: var(--success); background: rgba(74, 222, 128, 0.06); }
+    .score-block--c { color: var(--accent); border-color: var(--accent); background: rgba(0, 217, 255, 0.06); }
+
+    /* Cursor for "typing" line */
+    .cursor::after {
+      content: '▌'; display: inline-block; margin-left: 0.15rem; color: var(--accent);
+      animation: blink 1s steps(2) infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+  </style>
+
+  <header class="demo__head">
+    <span class="demo__eyebrow">Get started</span>
+    <h2 class="demo__title" id="demo-title">Install, configure, and watch it run</h2>
+    <p class="demo__subtitle">
+      Three install paths. Four config questions. One audit you can replay below.
+    </p>
+  </header>
+
+  <!-- ============================================================ -->
+  <!-- Subsection A: Install (3 ways)                                -->
+  <!-- ============================================================ -->
+  <div class="demo__section" id="install">
+    <h3 class="demo__section-title">
+      <span>Install</span>
+      <span class="demo__section-tag">3 ways</span>
+    </h3>
+
+    <div class="install-tabs">
+      <input class="install-tabs__radio" type="radio" name="install-tab" id="install-tab-1" checked>
+      <input class="install-tabs__radio" type="radio" name="install-tab" id="install-tab-2">
+      <input class="install-tabs__radio" type="radio" name="install-tab" id="install-tab-3">
+
+      <div class="install-tabs__nav" role="tablist" aria-label="Install methods">
+        <label class="install-tabs__label" for="install-tab-1" role="tab">
+          <span class="install-tabs__num">01</span>One-line curl
+        </label>
+        <label class="install-tabs__label" for="install-tab-2" role="tab">
+          <span class="install-tabs__num">02</span>Manual git clone
+        </label>
+        <label class="install-tabs__label" for="install-tab-3" role="tab">
+          <span class="install-tabs__num">03</span>Claude Code skill
+        </label>
+      </div>
+
+      <div class="install-tabs__panels">
+        <div class="install-tabs__panel" id="install-panel-1" role="tabpanel">
+          <pre class="code-block" id="cb-1"><button class="copy-btn" type="button" data-copy-target="cb-1" aria-label="Copy install command">Copy</button><span class="cmd">curl</span> -sSL https://raw.githubusercontent.com/servas-ai/code-quality-skills-kit/main/install.sh | sh</pre>
+        </div>
+        <div class="install-tabs__panel" id="install-panel-2" role="tabpanel">
+          <pre class="code-block" id="cb-2"><button class="copy-btn" type="button" data-copy-target="cb-2" aria-label="Copy install command">Copy</button><span class="cmd">git</span> clone --depth 1 https://github.com/servas-ai/code-quality-skills-kit /tmp/cqsk
+<span class="cmd">cp</span> /tmp/cqsk/code-quality-checker.md ./
+<span class="cmd">cp</span> -r /tmp/cqsk/code-quality-skills ./
+<span class="cmd">echo</span> "audit-reports/" >> .gitignore</pre>
+        </div>
+        <div class="install-tabs__panel" id="install-panel-3" role="tabpanel">
+          <pre class="code-block" id="cb-3"><button class="copy-btn" type="button" data-copy-target="cb-3" aria-label="Copy install command">Copy</button><span class="cmt"># Drop into ~/.claude/commands/ for global slash command</span>
+<span class="cmd">mkdir</span> -p ~/.claude/commands
+<span class="cmd">curl</span> -sSL https://raw.githubusercontent.com/servas-ai/code-quality-skills-kit/main/code-quality-checker.md \
+  -o ~/.claude/commands/code-quality-checker.md</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- Subsection B: Configure (4 questions)                         -->
+  <!-- ============================================================ -->
+  <div class="demo__section" id="configure">
+    <h3 class="demo__section-title">
+      <span>Configure</span>
+      <span class="demo__section-tag">4 questions</span>
+    </h3>
+
+    <div class="config-grid">
+      <form class="config-form" id="cqc-form" aria-label="Configuration onboarding">
+        <div class="config-q">
+          <label class="config-q__label">
+            <span class="config-q__num">1</span>
+            <span class="config-q__title">Run real tools?</span>
+          </label>
+          <div class="radio-row">
+            <label class="radio-pill">
+              <input type="radio" name="real-tools" value="real" checked>
+              <span>Yes</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="real-tools" value="grep">
+              <span>No, greps only</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="config-q">
+          <label class="config-q__label" for="scope">
+            <span class="config-q__num">2</span>
+            <span class="config-q__title">Audit scope?</span>
+          </label>
+          <select class="config-select" id="scope" name="scope">
+            <option value="whole-repo">Whole repo</option>
+            <option value="active-30d">Active code (last 30d)</option>
+            <option value="critical-paths">Critical paths only</option>
+          </select>
+        </div>
+
+        <div class="config-q">
+          <label class="config-q__label" for="severity">
+            <span class="config-q__num">3</span>
+            <span class="config-q__title">Severity threshold?</span>
+          </label>
+          <select class="config-select" id="severity" name="severity">
+            <option value="all">All findings</option>
+            <option value="medium">Medium and above</option>
+            <option value="high">High and critical only</option>
+          </select>
+        </div>
+
+        <div class="config-q">
+          <label class="config-q__label">
+            <span class="config-q__num">4</span>
+            <span class="config-q__title">Multi-CLI parallel?</span>
+          </label>
+          <div class="checkbox-row">
+            <label class="checkbox-pill">
+              <input type="checkbox" name="cli" value="claude" checked>
+              <span>Claude</span>
+            </label>
+            <label class="checkbox-pill">
+              <input type="checkbox" name="cli" value="gemini" checked>
+              <span>Gemini</span>
+            </label>
+            <label class="checkbox-pill">
+              <input type="checkbox" name="cli" value="opencode" checked>
+              <span>OpenCode</span>
+            </label>
+            <label class="checkbox-pill">
+              <input type="checkbox" name="cli" value="codex" checked>
+              <span>Codex</span>
+            </label>
+          </div>
+        </div>
+      </form>
+
+      <div class="config-preview" aria-live="polite">
+        <div class="config-preview__head">
+          <span class="config-preview__name">
+            <span class="config-preview__dot" aria-hidden="true"></span>
+            cqc.config.yaml
+          </span>
+          <button class="copy-btn" type="button" data-copy-target="cqc-config" style="position:static;">Copy config</button>
+        </div>
+        <pre class="config-preview__body" id="cqc-config"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- Subsection C: Live demo                                       -->
+  <!-- ============================================================ -->
+  <div class="demo__section" id="live-demo">
+    <h3 class="demo__section-title">
+      <span>Live Demo</span>
+      <span class="demo__section-tag">replayable</span>
+    </h3>
+
+    <div class="terminal" role="region" aria-label="Code quality audit demo terminal">
+      <div class="terminal__head">
+        <span class="terminal__dot terminal__dot--r" aria-hidden="true"></span>
+        <span class="terminal__dot terminal__dot--y" aria-hidden="true"></span>
+        <span class="terminal__dot terminal__dot--g" aria-hidden="true"></span>
+        <span class="terminal__title">~/my-nextjs-app — code-quality-checker</span>
+        <button class="terminal__replay" id="replay-btn" type="button" aria-label="Replay demo animation">
+          <span aria-hidden="true">▶</span>Replay demo
+        </button>
+      </div>
+      <div class="terminal__body" id="terminal-body" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // ---------- Copy buttons ----------
+      function setupCopy(btn) {
+        btn.addEventListener('click', function () {
+          var targetId = btn.getAttribute('data-copy-target');
+          var el = document.getElementById(targetId);
+          if (!el) return;
+          var text = el.innerText.replace(/^Copy\s*/, '').replace(/^Copy config\s*/, '').trim();
+          var doneOk = function () {
+            var prev = btn.textContent;
+            btn.textContent = '✓ copied';
+            btn.classList.add('copy-btn--ok');
+            setTimeout(function () {
+              btn.textContent = prev;
+              btn.classList.remove('copy-btn--ok');
+            }, 2000);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(doneOk).catch(function () {
+              fallbackCopy(text); doneOk();
+            });
+          } else {
+            fallbackCopy(text); doneOk();
+          }
+        });
+      }
+      function fallbackCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+      var copyBtns = document.querySelectorAll('.copy-btn');
+      for (var i = 0; i < copyBtns.length; i++) setupCopy(copyBtns[i]);
+
+      // ---------- Config preview ----------
+      var form = document.getElementById('cqc-form');
+      var preview = document.getElementById('cqc-config');
+
+      function readForm() {
+        var realTools = (form.querySelector('input[name="real-tools"]:checked') || {}).value || 'real';
+        var scope = form.querySelector('#scope').value;
+        var severity = form.querySelector('#severity').value;
+        var clis = [];
+        var boxes = form.querySelectorAll('input[name="cli"]:checked');
+        for (var i = 0; i < boxes.length; i++) clis.push(boxes[i].value);
+        return { realTools: realTools, scope: scope, severity: severity, clis: clis };
+      }
+
+      function renderConfig() {
+        var c = readForm();
+        var clisYaml = c.clis.length
+          ? c.clis.map(function (x) { return '    - ' + x; }).join('\n')
+          : '    []';
+        var lines = [
+          '<span class="yc"># cqc.config.yaml — auto-generated</span>',
+          '<span class="yk">version</span>: <span class="yv">3.6</span>',
+          '<span class="yk">audit</span>:',
+          '  <span class="yk">real_tools</span>: <span class="yv">' + (c.realTools === 'real' ? 'true' : 'false') + '</span>',
+          '  <span class="yk">scope</span>: <span class="yv">' + c.scope + '</span>',
+          '  <span class="yk">severity_threshold</span>: <span class="yv">' + c.severity + '</span>',
+          '<span class="yk">multi_cli</span>:',
+          '  <span class="yk">enabled</span>: <span class="yv">' + (c.clis.length > 1 ? 'true' : 'false') + '</span>',
+          '  <span class="yk">agents</span>:',
+          clisYaml,
+          '<span class="yk">output</span>:',
+          '  <span class="yk">dir</span>: <span class="yv">audit-reports/</span>',
+          '  <span class="yk">formats</span>: [<span class="yv">compact</span>, <span class="yv">html</span>, <span class="yv">fix-prompts</span>]'
+        ];
+        preview.innerHTML = lines.join('\n');
+      }
+      form.addEventListener('change', renderConfig);
+      renderConfig();
+
+      // ---------- Live demo ----------
+      var STEP = 250;
+      var lines = [
+        { t: 'prompt', txt: '$ cd ./my-nextjs-app' },
+        { t: 'prompt', txt: '$ /code-quality-checker' },
+        { t: 'gap' },
+        { t: 'dim',  txt: '  ┌──────────────────────────────────────────────────────────────────────┐' },
+        { t: 'accent', txt: '  │     ░█▀▀░░█▀█░░█▀█       Code Quality Skills Kit  ·  v3.6           │' },
+        { t: 'accent', txt: '  │     ░█░░░░█░█░░█░█       ────────────────────────────────────       │' },
+        { t: 'accent', txt: '  │     ░▀▀▀░░▀▀▀░░▀▀▀       Multi-CLI · 15 dimensions · 99% coverage   │' },
+        { t: 'dim',  txt: '  └──────────────────────────────────────────────────────────────────────┘' },
+        { t: 'gap' },
+        { t: 'dim',  txt: '  ┌─ CLI Agents · live status @ 2026-05-01 22:42 ──────────────────┐' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--ok">claude   ●</span>  2.1.126  ✓ latest  max     martiking@... $46/d    │' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--ok">gemini   ●</span>  0.40.1   ✓ latest  free    martiking@... n/a      │' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--warn">opencode ◐</span>  1.14.29  ↑ 1.14.31 local   nvidia/glm   3 evts    │' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--ok">codex    ●</span>  0.125.0  ↑ 0.128.0 chatgpt 46a93fbd...  5 evts    │' },
+        { t: 'dim',  txt: '  └────────────────────────────────────────────────────────────────┘' },
+        { t: 'gap' },
+        { t: 'plain', txt: '  📋 Audit plan ready · <span class="terminal__line--accent">13 skills active</span> · 2 skipped (d10, d14)' },
+        { t: 'dim',  txt: '     Estimated wall-time: 8 min · Files in scope: 211 · Critical-Cap: ON' },
+        { t: 'gap' },
+        { t: 'plain', txt: '  [Group 1: quality] d1✅ d6<span class="pulse">⏳</span> d8✅ d9✅ d13<span class="pulse">⏳</span> d14⌛ d15⌛  3/7 done' },
+        { t: 'plain', txt: '  [Group 2: types]   d2⌛ d3⌛' },
+        { t: 'plain', txt: '  [Group 3: perf]    d5⌛ d10⌛ d12⌛' },
+        { t: 'plain', txt: '  [Group 4: ux]      d7⌛ d11⌛' },
+        { t: 'plain', txt: '  [Group 5: <span class="terminal__line--crit">SEC</span>]    d4⌛  ← runs LAST' },
+        { t: 'gap' },
+        { t: 'score' },
+        { t: 'plain', txt: '     12 findings · cov 100% · 5 outputs' },
+        { t: 'gap' },
+        { t: 'plain', txt: '  ▸ <span class="terminal__line--accent">audit-reports/2026-05-01__abc1234/REPORT.compact.txt</span>' },
+        { t: 'plain', txt: '  ▸ <span class="terminal__line--accent">audit-reports/2026-05-01__abc1234/dashboard.html</span>' },
+        { t: 'plain', txt: '  ▸ <span class="terminal__line--accent">audit-reports/2026-05-01__abc1234/fix-prompts.md</span>' }
+      ];
+
+      var body = document.getElementById('terminal-body');
+      var replayBtn = document.getElementById('replay-btn');
+      var timers = [];
+
+      function clearTimers() {
+        for (var i = 0; i < timers.length; i++) clearTimeout(timers[i]);
+        timers = [];
+      }
+
+      function makeLine(item) {
+        var div = document.createElement('div');
+        div.className = 'terminal__line';
+        if (item.t === 'gap') {
+          div.innerHTML = '&nbsp;';
+        } else if (item.t === 'prompt') {
+          div.classList.add('terminal__line--prompt');
+          div.textContent = item.txt;
+        } else if (item.t === 'dim') {
+          div.classList.add('terminal__line--dim');
+          div.textContent = item.txt;
+        } else if (item.t === 'accent') {
+          div.classList.add('terminal__line--accent');
+          div.textContent = item.txt;
+        } else if (item.t === 'score') {
+          div.innerHTML =
+            '  <span class="terminal__line--ok">✅ 2026-05-01__abc1234</span> · ' +
+            '<span class="score-block">score 47/100 (capped: 13h&gt;5)</span>';
+        } else {
+          div.innerHTML = item.txt;
+        }
+        return div;
+      }
+
+      function play() {
+        clearTimers();
+        body.innerHTML = '';
+        for (var i = 0; i < lines.length; i++) {
+          (function (idx, item) {
+            var t = setTimeout(function () {
+              var ln = makeLine(item);
+              body.appendChild(ln);
+              // Trigger transition
+              requestAnimationFrame(function () {
+                ln.classList.add('terminal__line--in');
+              });
+              body.scrollTop = body.scrollHeight;
+            }, idx * STEP);
+            timers.push(t);
+          })(i, lines[i]);
+        }
+      }
+
+      replayBtn.addEventListener('click', play);
+
+      // Auto-play once when scrolled into view
+      if ('IntersectionObserver' in window) {
+        var io = new IntersectionObserver(function (entries) {
+          for (var i = 0; i < entries.length; i++) {
+            if (entries[i].isIntersecting) {
+              play();
+              io.disconnect();
+              break;
+            }
+          }
+        }, { threshold: 0.25 });
+        io.observe(document.getElementById('live-demo'));
+      } else {
+        play();
+      }
+    })();
+  </script>
+</section>
+
+
+<footer style="padding: 48px 24px; border-top: 1px solid var(--border); color: var(--muted); text-align: center; font-size: 13px; max-width: 1200px; margin: 80px auto 0;">
+  <p style="margin: 0 0 8px;">Built with multi-agent parallel sub-agents — eating our own dog food.</p>
+  <p style="margin: 0;">
+    <a href="https://github.com/servas-ai/code-quality-skills-kit" style="color: var(--accent); text-decoration: none;">GitHub</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/servas-ai/code-quality-skills-kit/blob/main/LICENSE" style="color: var(--accent); text-decoration: none;">MIT License</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/servas-ai/code-quality-skills-kit/blob/main/CHANGELOG.md" style="color: var(--accent); text-decoration: none;">Changelog</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/servas-ai/code-quality-skills-kit/blob/main/30-MORE-IMPROVEMENTS.md" style="color: var(--accent); text-decoration: none;">Roadmap</a>
+  </p>
+  <p style="margin: 16px 0 0; font-size: 11px; color: var(--border);">v3.6 · 2026-05-01</p>
+</footer>
+
+</main>
+</body>
+</html>
