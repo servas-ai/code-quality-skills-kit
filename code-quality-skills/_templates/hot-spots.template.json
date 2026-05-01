@@ -1,0 +1,12 @@
+{
+  "run_id": "TEMPLATE",
+  "computed_at": "1970-01-01T00:00:00Z",
+  "formula": "log(1 + modification_count_30d) * len(findings) * (loc / 100)",
+  "top_files": [],
+  "stats": {
+    "files_with_zero_findings": 0,
+    "files_with_critical": 0,
+    "avg_findings_per_changed_file": 0.0,
+    "avg_findings_per_unchanged_file": 0.0
+  }
+}

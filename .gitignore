@@ -1,0 +1,11 @@
+# Audit run output (per-consumer-repo, never commit)
+audit-reports/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Sandbox snapshots from local testing
+.sandbox-runs/
