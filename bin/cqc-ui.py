@@ -10,6 +10,7 @@ Endpoints:
   POST /api/cancel/<run_id>     terminates background subprocess
   GET  /api/log/<run_id>/<cli>  raw log file
 """
+import base64
 import http.server
 import json
 import os
@@ -23,7 +24,7 @@ from datetime import datetime, timezone
 
 ROOT = os.environ.get("CQC_ROOT", os.getcwd())
 PORT = int(os.environ.get("CQC_PORT", "4020"))
-VERSION = os.environ.get("CQC_VERSION", "v3.15")
+VERSION = os.environ.get("CQC_VERSION", "v3.17")
 CLIS = ("claude", "gemini", "opencode", "codex")
 BUDGET_FILE = os.path.expanduser("~/.cqc/budget.json")
 USAGE_FILE  = os.path.expanduser("~/.cqc/usage.json")
@@ -45,6 +46,128 @@ def load_usage():
         with open(USAGE_FILE) as f: return json.load(f)
     except Exception:
         return {"by_cli": {c: {"today_usd":0.0,"today_tokens":0,"calls_today":0} for c in CLIS}}
+
+
+def jwt_payload(token):
+    """Decode JWT payload (NO signature verify — read-only display)."""
+    if not token or "." not in token: return None
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload).decode())
+    except Exception:
+        return None
+
+
+def fmt_age(secs):
+    if secs < 0: return f"expired {fmt_age(-secs)} ago"
+    if secs < 60: return f"{int(secs)}s"
+    if secs < 3600: return f"{int(secs/60)}m"
+    if secs < 86400: return f"{int(secs/3600)}h"
+    return f"{int(secs/86400)}d"
+
+
+def get_account_info(cli):
+    """Pull account info from each CLI's auth file. Returns {email, plan, expires, scopes, auth_path, error}."""
+    info = {"email": None, "plan": None, "expires_at": None, "expires_in": None,
+            "auth_path": None, "scopes": None, "providers": None, "auth_type": None,
+            "account_id": None, "error": None}
+    if cli == "codex":
+        p = os.path.expanduser("~/.codex/auth.json")
+        info["auth_path"] = p
+        if not os.path.isfile(p):
+            info["error"] = "auth.json missing — run `codex login`"; return info
+        try:
+            with open(p) as f: a = json.load(f)
+            info["auth_type"] = a.get("auth_mode", "unknown")
+            tok = a.get("tokens", {})
+            payload = jwt_payload(tok.get("id_token") or tok.get("access_token"))
+            if payload:
+                info["email"] = payload.get("email")
+                info["account_id"] = (payload.get("https://api.openai.com/auth", {}) or {}).get("chatgpt_account_id")
+                auth_meta = payload.get("https://api.openai.com/auth", {}) or {}
+                info["plan"] = auth_meta.get("chatgpt_plan_type") or info["auth_type"]
+                until = auth_meta.get("chatgpt_subscription_active_until")
+                if until:
+                    info["expires_at"] = until
+                    try:
+                        t = datetime.fromisoformat(until.replace("Z", "+00:00"))
+                        info["expires_in"] = fmt_age((t - datetime.now(timezone.utc)).total_seconds())
+                    except Exception: pass
+                # Token expiry (access_token exp claim)
+                if payload.get("exp"):
+                    info["token_exp"] = datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()
+        except Exception as e:
+            info["error"] = f"parse error: {e}"
+    elif cli == "claude":
+        p = os.path.expanduser("~/.claude/.credentials.json")
+        info["auth_path"] = p
+        if not os.path.isfile(p):
+            info["error"] = ".credentials.json missing — run `claude /login`"; return info
+        try:
+            with open(p) as f: a = json.load(f)
+            oa = a.get("claudeAiOauth", {})
+            info["scopes"] = oa.get("scopes")
+            info["auth_type"] = "oauth"
+            exp_ms = oa.get("expiresAt")
+            if exp_ms:
+                t = datetime.fromtimestamp(exp_ms/1000, tz=timezone.utc)
+                info["expires_at"] = t.isoformat()
+                info["expires_in"] = fmt_age((t - datetime.now(timezone.utc)).total_seconds())
+            # Try to read settings for plan/email
+            sp = os.path.expanduser("~/.claude/auth.json")
+            if os.path.isfile(sp):
+                try:
+                    with open(sp) as f: ad = json.load(f)
+                    info["email"] = ad.get("email")
+                    info["plan"]  = ad.get("subscription_type") or ad.get("plan")
+                except Exception: pass
+        except Exception as e:
+            info["error"] = f"parse error: {e}"
+    elif cli == "gemini":
+        ga = os.path.expanduser("~/.gemini/google_accounts.json")
+        info["auth_path"] = ga
+        if os.path.isfile(ga):
+            try:
+                with open(ga) as f: a = json.load(f)
+                info["email"] = a.get("active")
+            except Exception: pass
+        st = os.path.expanduser("~/.gemini/settings.json")
+        if os.path.isfile(st):
+            try:
+                with open(st) as f: s = json.load(f)
+                info["auth_type"] = (s.get("security", {}).get("auth", {}) or {}).get("selectedType")
+                info["plan"] = "free (oauth-personal)" if info["auth_type"] == "oauth-personal" else info["auth_type"]
+            except Exception: pass
+        # OAuth creds expiry
+        oc = os.path.expanduser("~/.gemini/oauth_creds.json")
+        if os.path.isfile(oc):
+            try:
+                with open(oc) as f: o = json.load(f)
+                exp_ms = o.get("expiry_date") or o.get("expiry")
+                if exp_ms and exp_ms > 1e10: exp_ms = exp_ms / 1000
+                if exp_ms:
+                    t = datetime.fromtimestamp(exp_ms, tz=timezone.utc)
+                    info["expires_at"] = t.isoformat()
+                    info["expires_in"] = fmt_age((t - datetime.now(timezone.utc)).total_seconds())
+            except Exception: pass
+        if not info["email"]:
+            info["error"] = "no active account — run `gemini /auth`"
+    elif cli == "opencode":
+        p = os.path.expanduser("~/.local/share/opencode/auth.json")
+        info["auth_path"] = p
+        if not os.path.isfile(p):
+            info["error"] = "auth.json missing — run `opencode auth login`"; return info
+        try:
+            with open(p) as f: a = json.load(f)
+            providers = []
+            for prov, meta in a.items():
+                providers.append({"name": prov, "type": meta.get("type"), "has_key": bool(meta.get("key"))})
+            info["providers"] = providers
+            info["plan"] = ", ".join(p["name"] for p in providers) if providers else "no providers"
+        except Exception as e:
+            info["error"] = f"parse error: {e}"
+    return info
 
 
 def get_metrics():
@@ -129,14 +252,16 @@ def cli_status():
                 plan = "free"
         m = metrics["by_cli"].get(name, {})
         u = usage_by_cli.get(name, {}) or {}
+        acct = get_account_info(name)
         # Real numbers from ccusage take precedence
         real_used_pct = u.get("used_pct", m.get("used_pct", 0))
         real_today_usd = u.get("today_usd", m.get("today_usd", 0.0))
-        # Model used is dynamic (from real usage) or configured fallback
         model_used = u.get("model_used") or m.get("model")
+        # Email overrides plan field if available
+        display_plan = acct.get("plan") or plan
         out.append({
             "name": name, "installed": installed, "version": ver,
-            "plan": plan,
+            "plan": display_plan,
             "today_usd": real_today_usd,
             "today_tokens": u.get("today_tokens", 0),
             "calls_today": u.get("calls_today", 0),
@@ -146,6 +271,16 @@ def cli_status():
             "blocked": m.get("blocked", False),
             "model": model_used,
             "model_chain": budget.get("model_chains", {}).get(name, []),
+            "account": {
+                "email":      acct.get("email"),
+                "expires_in": acct.get("expires_in"),
+                "expires_at": acct.get("expires_at"),
+                "auth_type":  acct.get("auth_type"),
+                "auth_path":  acct.get("auth_path"),
+                "providers":  acct.get("providers"),
+                "scopes":     acct.get("scopes"),
+                "error":      acct.get("error"),
+            },
         })
     return out
 
@@ -284,11 +419,14 @@ def safe_run_id(s):
     return bool(re.match(r"^[A-Za-z0-9_\-:.]{1,64}$", s or ""))
 
 
-CSS = ".tile-blocked{background:#2a0a0a!important;border:2px solid var(--red)!important;opacity:.7}.tile-blocked .name::after{content:'  ⛔ NICHT NUTZBAR';color:var(--red);font-size:10px;letter-spacing:.05em}.tile-hot{border-color:var(--amber)!important;box-shadow:0 0 0 1px var(--amber)}.tile-full{border-color:var(--red)!important;box-shadow:0 0 0 1px var(--red)}.cap-line{position:absolute;top:-2px;width:2px;height:8px;background:var(--amber);z-index:2}.bar{position:relative}#mp-row label{font-size:11px;color:var(--muted);margin-bottom:4px;display:block}#mp{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:8px;border-radius:6px;font:inherit}#refresh{position:relative}#refresh.spinning::before{content:'';position:absolute;left:8px;top:8px;width:14px;height:14px;border:2px solid var(--violet);border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.usage-stale{color:var(--amber)!important}.tile-tokens{font-size:10px;color:var(--muted);margin-top:2px}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 'JetBrains Mono','SF Mono',Consolas,monospace;min-width:1280px}.wrap{max-width:1280px;margin:0 auto;padding:20px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}header h1{margin:0;font-size:18px;letter-spacing:-.01em}header h1 small{color:var(--muted);font-weight:400;margin-left:8px;font-size:12px}.actions button{background:var(--card);color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:6px;font:inherit;cursor:pointer;margin-left:6px}.actions button:hover{border-color:var(--green)}.actions button.danger:hover{border-color:var(--red)}.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}.tile{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px;cursor:pointer}.tile:hover{border-color:var(--violet)}.tile .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}.tile .name{font-weight:600;text-transform:lowercase}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--slate)}.dot.green{background:var(--green)}.dot.amber{background:var(--amber);animation:pulse 1.4s infinite}.dot.red{background:var(--red)}.dot.slate{background:var(--slate)}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}.tile .meta{color:var(--muted);font-size:11px;line-height:1.7}.tile .meta b{color:var(--fg);font-weight:500}.tile .usd{color:var(--violet);font-weight:600}.bar{height:4px;background:var(--border);border-radius:2px;margin-top:6px;overflow:hidden}.bar>span{display:block;height:100%;background:var(--violet)}section{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:16px}section h2{margin:0;padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 16px;text-align:left;border-bottom:1px solid var(--border)}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(255,255,255,.02)}th{color:var(--muted);font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.row-click{cursor:pointer}.empty{padding:32px 16px;text-align:center;color:var(--muted)}.btn-x{background:transparent;color:var(--muted);border:1px solid var(--border);padding:3px 10px;border-radius:4px;font:inherit;font-size:11px;cursor:pointer}.btn-x:hover{border-color:var(--red);color:var(--red)}.pills{display:flex;gap:6px;padding:14px 16px;flex-wrap:wrap}.pill{padding:6px 12px;border-radius:99px;font-size:11px;background:var(--border);color:var(--muted);cursor:pointer}.pill.green{background:rgba(34,197,94,.18);color:var(--green)}.pill.amber{background:rgba(245,158,11,.18);color:var(--amber)}.pill.red{background:rgba(239,68,68,.18);color:var(--red)}.pill.slate{background:rgba(100,116,139,.18);color:var(--slate)}.split{display:grid;grid-template-columns:1fr 320px;gap:16px;margin-bottom:16px}.spend{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}.spend .big{font-size:28px;font-weight:700;color:var(--violet);cursor:pointer}.spend .lab{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}.spark{display:flex;gap:3px;align-items:flex-end;height:40px;margin-top:10px}.spark span{flex:1;background:var(--violet);opacity:.7;min-height:2px;border-radius:1px}footer{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;padding:8px 0}.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}.modal.on{display:flex}.modal .box{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;width:420px}.modal h3{margin:0 0 14px;font-size:14px}.modal label{display:block;margin:6px 0;cursor:pointer}.modal input[type=text]{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:8px;border-radius:6px;font:inherit;margin-top:8px}.modal .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--red);border-radius:8px;padding:10px 14px;font-size:12px;z-index:60;display:none}.toast.on{display:block}.drawer{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center;z-index:55}.drawer.on{display:flex}.drawer .panel{background:var(--card);border-top:1px solid var(--border);border-radius:10px 10px 0 0;width:100%;max-width:1280px;max-height:70vh;overflow:auto;padding:16px}.drawer h3{margin:0 0 10px;font-size:13px}.drawer pre{background:var(--bg);border:1px solid var(--border);padding:10px;border-radius:6px;font:12px/1.4 inherit;white-space:pre-wrap;color:var(--muted);max-height:50vh;overflow:auto}.tag{display:inline-block;padding:2px 8px;border-radius:4px;background:var(--border);font-size:10px;color:var(--muted)}"
+CSS = ".tile-blocked{background:#2a0a0a!important;border:2px solid var(--red)!important;opacity:.7}.tile-blocked .name::after{content:'  ⛔ NICHT NUTZBAR';color:var(--red);font-size:10px;letter-spacing:.05em}.tile-hot{border-color:var(--amber)!important;box-shadow:0 0 0 1px var(--amber)}.tile-full{border-color:var(--red)!important;box-shadow:0 0 0 1px var(--red)}.cap-line{position:absolute;top:-2px;width:2px;height:8px;background:var(--amber);z-index:2}.bar{position:relative}#mp-row label{font-size:11px;color:var(--muted);margin-bottom:4px;display:block}#mp{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:8px;border-radius:6px;font:inherit}#refresh{position:relative}#refresh.spinning::before{content:'';position:absolute;left:8px;top:8px;width:14px;height:14px;border:2px solid var(--violet);border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.usage-stale{color:var(--amber)!important}.tile-tokens{font-size:10px;color:var(--muted);margin-top:2px}.acct-row{display:flex;justify-content:space-between;align-items:center;font-size:10.5px;margin:4px 0;padding:3px 6px;background:rgba(139,92,246,.06);border-radius:4px}.acct-email{color:var(--fg);font-weight:500;font-family:inherit}.acct-exp{color:var(--muted);font-size:10px}.exp-red{color:var(--red)!important;font-weight:600}.exp-amber{color:var(--amber)!important}.kv{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:11.5px}.kv-k{color:var(--muted);min-width:120px}.kv-v{color:var(--fg);text-align:right;word-break:break-all;flex:1;margin-left:12px}.set-section{margin:14px 0;padding:12px;background:rgba(255,255,255,.02);border-radius:6px}.set-h{font-size:10px;text-transform:uppercase;color:var(--muted);letter-spacing:.06em;margin-bottom:10px;font-weight:600}.set-row{display:flex;align-items:center;gap:10px;margin:8px 0}.set-lbl{min-width:90px;font-size:11px;color:var(--fg);font-weight:500}.set-row input[type=range]{flex:1}.set-row input[type=text],.set-row input[type=number]{background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:6px 8px;border-radius:4px;font:inherit;font-size:11px}#drawer-body{background:var(--bg);border:1px solid var(--border);padding:14px;border-radius:6px;max-height:60vh;overflow:auto}#drawer-body h4:first-child{margin-top:0}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 'JetBrains Mono','SF Mono',Consolas,monospace;min-width:1280px}.wrap{max-width:1280px;margin:0 auto;padding:20px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}header h1{margin:0;font-size:18px;letter-spacing:-.01em}header h1 small{color:var(--muted);font-weight:400;margin-left:8px;font-size:12px}.actions button{background:var(--card);color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:6px;font:inherit;cursor:pointer;margin-left:6px}.actions button:hover{border-color:var(--green)}.actions button.danger:hover{border-color:var(--red)}.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}.tile{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px;cursor:pointer}.tile:hover{border-color:var(--violet)}.tile .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}.tile .name{font-weight:600;text-transform:lowercase}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--slate)}.dot.green{background:var(--green)}.dot.amber{background:var(--amber);animation:pulse 1.4s infinite}.dot.red{background:var(--red)}.dot.slate{background:var(--slate)}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}.tile .meta{color:var(--muted);font-size:11px;line-height:1.7}.tile .meta b{color:var(--fg);font-weight:500}.tile .usd{color:var(--violet);font-weight:600}.bar{height:4px;background:var(--border);border-radius:2px;margin-top:6px;overflow:hidden}.bar>span{display:block;height:100%;background:var(--violet)}section{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:16px}section h2{margin:0;padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 16px;text-align:left;border-bottom:1px solid var(--border)}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(255,255,255,.02)}th{color:var(--muted);font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.row-click{cursor:pointer}.empty{padding:32px 16px;text-align:center;color:var(--muted)}.btn-x{background:transparent;color:var(--muted);border:1px solid var(--border);padding:3px 10px;border-radius:4px;font:inherit;font-size:11px;cursor:pointer}.btn-x:hover{border-color:var(--red);color:var(--red)}.pills{display:flex;gap:6px;padding:14px 16px;flex-wrap:wrap}.pill{padding:6px 12px;border-radius:99px;font-size:11px;background:var(--border);color:var(--muted);cursor:pointer}.pill.green{background:rgba(34,197,94,.18);color:var(--green)}.pill.amber{background:rgba(245,158,11,.18);color:var(--amber)}.pill.red{background:rgba(239,68,68,.18);color:var(--red)}.pill.slate{background:rgba(100,116,139,.18);color:var(--slate)}.split{display:grid;grid-template-columns:1fr 320px;gap:16px;margin-bottom:16px}.spend{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}.spend .big{font-size:28px;font-weight:700;color:var(--violet);cursor:pointer}.spend .lab{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}.spark{display:flex;gap:3px;align-items:flex-end;height:40px;margin-top:10px}.spark span{flex:1;background:var(--violet);opacity:.7;min-height:2px;border-radius:1px}footer{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;padding:8px 0}.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}.modal.on{display:flex}.modal .box{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;width:420px}.modal h3{margin:0 0 14px;font-size:14px}.modal label{display:block;margin:6px 0;cursor:pointer}.modal input[type=text]{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:8px;border-radius:6px;font:inherit;margin-top:8px}.modal .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--red);border-radius:8px;padding:10px 14px;font-size:12px;z-index:60;display:none}.toast.on{display:block}.drawer{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center;z-index:55}.drawer.on{display:flex}.drawer .panel{background:var(--card);border-top:1px solid var(--border);border-radius:10px 10px 0 0;width:100%;max-width:1280px;max-height:70vh;overflow:auto;padding:16px}.drawer h3{margin:0 0 10px;font-size:13px}.drawer pre{background:var(--bg);border:1px solid var(--border);padding:10px;border-radius:6px;font:12px/1.4 inherit;white-space:pre-wrap;color:var(--muted);max-height:50vh;overflow:auto}.tag{display:inline-block;padding:2px 8px;border-radius:4px;background:var(--border);font-size:10px;color:var(--muted)}"
 
-JS = r"""let STATE=null;let MODE='parallel';const $=(id)=>document.getElementById(id);function fmt(n){return Number(n||0).toLocaleString()}function fmtTok(n){if(!n)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n)}function render(s){STATE=s;$('ver').textContent=s.version;$('foot-l').textContent='connected · '+s.root;const usdToday=(s.totals.usd_today||0).toFixed(2);$('foot-r').textContent='runs:'+s.totals.runs+' · findings:'+fmt(s.totals.findings)+' · today $'+usdToday+' · '+s.ts;const meta=s.usage_meta||{};if(meta.updated_at){const age=Math.floor((Date.now()-new Date(meta.updated_at).getTime())/1000);const stale=age>600;$('usage-meta').innerHTML=`<span class="${stale?'usage-stale':''}">usage: ${age<60?age+'s':Math.floor(age/60)+'m'} ago${stale?' · stale!':''}</span>`;}else{$('usage-meta').textContent='usage: never pulled — click 🔄';}$('tiles').innerHTML=s.clis.map(c=>{const usedPct=Math.min(100,c.used_pct||0);const capPct=Math.max(0,Math.min(100,c.cap_pct||0));let tileClass='tile';if(c.blocked)tileClass+=' tile-blocked';else if(usedPct>=85)tileClass+=' tile-full';else if(usedPct>=60)tileClass+=' tile-hot';const cls=c.blocked?'red':(usedPct>=85?'red':(usedPct>=60?'amber':(c.installed?'green':'slate')));const capTag=c.cap_pct?`<span class="tag">cap ${c.cap_pct}%</span>`:'';const usedTag=usedPct>0?`<span class="tag" style="color:${usedPct>=85?'var(--red)':usedPct>=60?'var(--amber)':'var(--green)'}">${usedPct}% used</span>`:'';const chain=(c.model_chain||[]).length?'<div class="meta" style="font-size:10px;opacity:.6">chain: '+(c.model_chain||[]).join(' → ')+'</div>':'';const modelLine=c.model?`<div class="meta" style="font-size:10px;opacity:.85">↳ active: <b>${c.model}</b></div>`:'';const tokensLine=(c.today_tokens||c.calls_today)?`<div class="tile-tokens">${c.today_tokens?fmtTok(c.today_tokens)+' tok':''}${c.today_tokens&&c.calls_today?' · ':''}${c.calls_today?c.calls_today+' calls':''}</div>`:'';return `<div class="${tileClass}" data-cli="${c.name}"><div class="top"><span class="name">${c.name} ${capTag}${usedTag}</span><span class="dot ${cls}"></span></div><div class="meta"><b>${c.version||'—'}</b> · ${c.plan} · today <span class="usd">$${(c.today_usd||0).toFixed(2)}</span><div class="bar"><span style="width:${usedPct}%;background:${usedPct>=capPct?'var(--red)':usedPct>=60?'var(--amber)':'var(--violet)'}"></span><span class="cap-line" style="left:${capPct}%"></span></div></div>${tokensLine}${modelLine}${chain}</div>`;}).join('');document.querySelectorAll('.tile').forEach(t=>t.onclick=()=>openCli(t.dataset.cli));if(!s.active.length){$('active').innerHTML='<div class="empty">No active runs. Click ▶ Orchestrate or ▶ Run Audit.</div>';}else{$('active').innerHTML='<table><thead><tr><th>Run</th><th>Mode</th><th>Scope</th><th>CLIs</th><th>Elapsed</th><th>Findings</th><th></th></tr></thead><tbody>'+s.active.map(r=>{const clis=Object.keys(r.agents||{}).join(' ')||(r.clis||[]).join(' ')||'all';const mode=(r.id||'').includes('orch')?'<span class="tag" style="color:var(--violet);border-color:var(--violet)">orch</span>':'<span class="tag">par</span>';return `<tr class="row-click" data-id="${r.id}"><td><span class="dot amber"></span> ${r.id}</td><td>${mode}</td><td><span class="tag">${r.scope}</span></td><td>${clis}</td><td>${r.elapsed}</td><td>${fmt(r.findings)}</td><td><button class="btn-x" data-cancel="${r.id}">■ Stop</button></td></tr>`;}).join('')+'</tbody></table>';}document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=(e)=>{e.stopPropagation();cancelRun(b.dataset.cancel)});document.querySelectorAll('.row-click').forEach(r=>r.onclick=()=>openRun(r.dataset.id));$('recent').innerHTML=s.recent.length?s.recent.map(r=>{const cls={done:'green',failed:'red',timeout:'amber',cancelled:'slate'}[r.phase]||'slate';return `<span class="pill ${cls}" data-rid="${r.id}" title="${r.id}">${r.id.slice(-8)} · ${fmt(r.findings)}f</span>`;}).join(''):'<div class="empty" style="padding:14px">No history yet.</div>';document.querySelectorAll('[data-rid]').forEach(p=>p.onclick=()=>openRun(p.dataset.rid));$('spark').innerHTML=(s.totals.spark.length?s.totals.spark:[0]).map(v=>{const max=Math.max(...s.totals.spark,1);return `<span style="height:${Math.max(2,(v/max)*40)}px"></span>`;}).join('');}async function refresh(){const r=await fetch('/api/state');if(r.ok)render(await r.json());}function startSSE(){const es=new EventSource('/api/stream');es.onmessage=e=>{try{render(JSON.parse(e.data))}catch{}};es.onerror=()=>{$('conn').className='dot red';setTimeout(()=>{es.close();startSSE()},5000);};es.onopen=()=>{$('conn').className='dot green'};}function openModal(mode){MODE=mode||'parallel';$('modal-title').textContent=MODE==='orchestrate'?'▶ Orchestrate (file-sharded, up to 20 parallel)':'▶ Run Audit (4 CLIs, 1 shard each)';$('mp-row').style.display=MODE==='orchestrate'?'block':'none';$('cli-checks').innerHTML=(STATE?STATE.clis:[]).map(c=>{const dis=(!c.installed||c.blocked);const lbl=c.name+(c.blocked?' (BLOCKED · cap 0%)':(c.installed?'':' (not installed)'));return `<label><input type="checkbox" value="${c.name}" ${dis?'disabled':'checked'}> ${lbl}</label>`;}).join('');$('modal').classList.add('on');}function closeModal(){$('modal').classList.remove('on')}async function confirmRun(){const clis=[...document.querySelectorAll('#cli-checks input:checked')].map(i=>i.value);const scope=$('scope').value||'.';const mp=parseInt($('mp').value||'20');const ep=MODE==='orchestrate'?'/api/orchestrate':'/api/run';const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,clis,max_parallel:mp})});const j=await r.json();closeModal();if(!r.ok){toast('Failed: '+(j.error||'unknown'));return}toast('Started '+j.run_id+' ('+j.mode+')');refresh();}async function cancelRun(id){await fetch('/api/cancel/'+encodeURIComponent(id),{method:'POST'});refresh();}async function pauseAll(){if(!STATE)return;for(const r of STATE.active)await cancelRun(r.id);}async function openRun(id){$('drawer-title').textContent='Run '+id;$('drawer-body').textContent='Loading…';$('drawer').classList.add('on');const clis=(STATE&&STATE.clis||[]).filter(c=>c.installed&&!c.blocked).map(c=>c.name);let buf='';for(const c of clis){const r=await fetch('/api/log/'+encodeURIComponent(id)+'/'+c);if(r.ok){const t=await r.text();if(t.trim())buf+='── '+c+' ──\n'+t.slice(-2000)+'\n\n';}}$('drawer-body').textContent=buf||'(no logs yet)';}function openCli(name){$('drawer-title').textContent='CLI · '+name;const recent=(STATE.recent||[]).concat(STATE.active||[]).slice(0,20);const lines=recent.map(r=>{const a=(r.agents||{})[name];return r.id+' · '+(a?a.status:'—')}).join('\n');$('drawer-body').textContent=lines||'(no recent invocations)';$('drawer').classList.add('on');}function closeDrawer(){$('drawer').classList.remove('on')}function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),5000)}async function refreshUsage(){const btn=$('refresh');btn.classList.add('spinning');btn.disabled=true;try{const r=await fetch('/api/usage/refresh',{method:'POST'});const j=await r.json();if(j.ok){toast('✓ Usage refreshed');refresh();}else{toast('Refresh failed: '+(j.error||j.stderr||'unknown'));}}catch(e){toast('Refresh error: '+e.message);}finally{btn.classList.remove('spinning');btn.disabled=false;}}$('refresh').onclick=refreshUsage;$('orch').onclick=()=>openModal('orchestrate');$('run').onclick=()=>openModal('parallel');$('pause').onclick=pauseAll;refresh();startSSE();"""
+JS = r"""let STATE=null;let MODE='parallel';const $=(id)=>document.getElementById(id);function fmt(n){return Number(n||0).toLocaleString()}function fmtTok(n){if(!n)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n)}function render(s){STATE=s;$('ver').textContent=s.version;$('foot-l').textContent='connected · '+s.root;const usdToday=(s.totals.usd_today||0).toFixed(2);$('foot-r').textContent='runs:'+s.totals.runs+' · findings:'+fmt(s.totals.findings)+' · today $'+usdToday+' · '+s.ts;const meta=s.usage_meta||{};if(meta.updated_at){const age=Math.floor((Date.now()-new Date(meta.updated_at).getTime())/1000);const stale=age>600;$('usage-meta').innerHTML=`<span class="${stale?'usage-stale':''}">usage: ${age<60?age+'s':Math.floor(age/60)+'m'} ago${stale?' · stale!':''}</span>`;}else{$('usage-meta').textContent='usage: never pulled — click 🔄';}$('tiles').innerHTML=s.clis.map(c=>{const usedPct=Math.min(100,c.used_pct||0);const capPct=Math.max(0,Math.min(100,c.cap_pct||0));let tileClass='tile';if(c.blocked)tileClass+=' tile-blocked';else if(usedPct>=85)tileClass+=' tile-full';else if(usedPct>=60)tileClass+=' tile-hot';const cls=c.blocked?'red':(usedPct>=85?'red':(usedPct>=60?'amber':(c.installed?'green':'slate')));const capTag=c.cap_pct?`<span class="tag">cap ${c.cap_pct}%</span>`:'';const usedTag=usedPct>0?`<span class="tag" style="color:${usedPct>=85?'var(--red)':usedPct>=60?'var(--amber)':'var(--green)'}">${usedPct}% used</span>`:'';const chain=(c.model_chain||[]).length?'<div class="meta" style="font-size:10px;opacity:.6">chain: '+(c.model_chain||[]).join(' → ')+'</div>':'';const modelLine=c.model?`<div class="meta" style="font-size:10px;opacity:.85">↳ active: <b>${c.model}</b></div>`:'';const tokensLine=(c.today_tokens||c.calls_today)?`<div class="tile-tokens">${c.today_tokens?fmtTok(c.today_tokens)+' tok':''}${c.today_tokens&&c.calls_today?' · ':''}${c.calls_today?c.calls_today+' calls':''}</div>`:'';const acct=c.account||{};const acctLine=acct.email?`<div class="acct-row"><span class="acct-email">👤 ${acct.email}</span>${acct.expires_in?`<span class="acct-exp ${acct.expires_in.includes('expired')?'exp-red':acct.expires_in.match(/^\d+m$/)?'exp-amber':''}">expires ${acct.expires_in}</span>`:''}</div>`:(acct.error?`<div class="acct-row exp-red">⚠ ${acct.error}</div>`:'');return `<div class="${tileClass}" data-cli="${c.name}"><div class="top"><span class="name">${c.name} ${capTag}${usedTag}</span><span class="dot ${cls}"></span></div>${acctLine}<div class="meta"><b>${c.version||'—'}</b> · ${c.plan||'—'} · today <span class="usd">$${(c.today_usd||0).toFixed(2)}</span><div class="bar"><span style="width:${usedPct}%;background:${usedPct>=capPct?'var(--red)':usedPct>=60?'var(--amber)':'var(--violet)'}"></span><span class="cap-line" style="left:${capPct}%"></span></div></div>${tokensLine}${modelLine}${chain}</div>`;}).join('');document.querySelectorAll('.tile').forEach(t=>t.onclick=()=>openCli(t.dataset.cli));if(!s.active.length){$('active').innerHTML='<div class="empty">No active runs. Click ▶ Orchestrate or ▶ Run Audit.</div>';}else{$('active').innerHTML='<table><thead><tr><th>Run</th><th>Mode</th><th>Scope</th><th>CLIs</th><th>Elapsed</th><th>Findings</th><th></th></tr></thead><tbody>'+s.active.map(r=>{const clis=Object.keys(r.agents||{}).join(' ')||(r.clis||[]).join(' ')||'all';const mode=(r.id||'').includes('orch')?'<span class="tag" style="color:var(--violet);border-color:var(--violet)">orch</span>':'<span class="tag">par</span>';return `<tr class="row-click" data-id="${r.id}"><td><span class="dot amber"></span> ${r.id}</td><td>${mode}</td><td><span class="tag">${r.scope}</span></td><td>${clis}</td><td>${r.elapsed}</td><td>${fmt(r.findings)}</td><td><button class="btn-x" data-cancel="${r.id}">■ Stop</button></td></tr>`;}).join('')+'</tbody></table>';}document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=(e)=>{e.stopPropagation();cancelRun(b.dataset.cancel)});document.querySelectorAll('.row-click').forEach(r=>r.onclick=()=>openRun(r.dataset.id));$('recent').innerHTML=s.recent.length?s.recent.map(r=>{const cls={done:'green',failed:'red',timeout:'amber',cancelled:'slate'}[r.phase]||'slate';return `<span class="pill ${cls}" data-rid="${r.id}" title="${r.id}">${r.id.slice(-8)} · ${fmt(r.findings)}f</span>`;}).join(''):'<div class="empty" style="padding:14px">No history yet.</div>';document.querySelectorAll('[data-rid]').forEach(p=>p.onclick=()=>openRun(p.dataset.rid));$('spark').innerHTML=(s.totals.spark.length?s.totals.spark:[0]).map(v=>{const max=Math.max(...s.totals.spark,1);return `<span style="height:${Math.max(2,(v/max)*40)}px"></span>`;}).join('');}async function refresh(){const r=await fetch('/api/state');if(r.ok)render(await r.json());}function startSSE(){const es=new EventSource('/api/stream');es.onmessage=e=>{try{render(JSON.parse(e.data))}catch{}};es.onerror=()=>{$('conn').className='dot red';setTimeout(()=>{es.close();startSSE()},5000);};es.onopen=()=>{$('conn').className='dot green'};}function openModal(mode){MODE=mode||'parallel';$('modal-title').textContent=MODE==='orchestrate'?'▶ Orchestrate (file-sharded, up to 20 parallel)':'▶ Run Audit (4 CLIs, 1 shard each)';$('mp-row').style.display=MODE==='orchestrate'?'block':'none';$('cli-checks').innerHTML=(STATE?STATE.clis:[]).map(c=>{const dis=(!c.installed||c.blocked);const lbl=c.name+(c.blocked?' (BLOCKED · cap 0%)':(c.installed?'':' (not installed)'));return `<label><input type="checkbox" value="${c.name}" ${dis?'disabled':'checked'}> ${lbl}</label>`;}).join('');$('modal').classList.add('on');}function closeModal(){$('modal').classList.remove('on')}async function confirmRun(){const clis=[...document.querySelectorAll('#cli-checks input:checked')].map(i=>i.value);const scope=$('scope').value||'.';const mp=parseInt($('mp').value||'20');const ep=MODE==='orchestrate'?'/api/orchestrate':'/api/run';const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope,clis,max_parallel:mp})});const j=await r.json();closeModal();if(!r.ok){toast('Failed: '+(j.error||'unknown'));return}toast('Started '+j.run_id+' ('+j.mode+')');refresh();}async function cancelRun(id){await fetch('/api/cancel/'+encodeURIComponent(id),{method:'POST'});refresh();}async function pauseAll(){if(!STATE)return;for(const r of STATE.active)await cancelRun(r.id);}async function openRun(id){$('drawer-title').textContent='Run '+id;$('drawer-body').textContent='Loading…';$('drawer').classList.add('on');const clis=(STATE&&STATE.clis||[]).filter(c=>c.installed&&!c.blocked).map(c=>c.name);let buf='';for(const c of clis){const r=await fetch('/api/log/'+encodeURIComponent(id)+'/'+c);if(r.ok){const t=await r.text();if(t.trim())buf+='── '+c+' ──\n'+t.slice(-2000)+'\n\n';}}$('drawer-body').textContent=buf||'(no logs yet)';}async function openCli(name){$('drawer-title').textContent='CLI · '+name;$('drawer-body').innerHTML='Loading…';$('drawer').classList.add('on');const cli=(STATE&&STATE.clis||[]).find(c=>c.name===name)||{};const acct=cli.account||{};const recent=(STATE.recent||[]).concat(STATE.active||[]).slice(0,15);const r=await fetch('/api/usage');const usage=r.ok?await r.json():{};const u=(usage.by_cli||{})[name]||{};const sect=(t,h)=>`<h4 style="margin:14px 0 6px;color:var(--violet);font-size:11px;text-transform:uppercase;letter-spacing:.06em">${t}</h4>${h}`;const kv=(k,v,c)=>`<div class="kv"><span class="kv-k">${k}</span><span class="kv-v ${c||''}">${v||'—'}</span></div>`;const acctHtml=sect('Account',`${kv('Email',acct.email||'(not logged in)',acct.email?'':'exp-red')}${kv('Plan',cli.plan)}${kv('Auth type',acct.auth_type)}${kv('Expires',acct.expires_at?acct.expires_at+' ('+acct.expires_in+')':'—',acct.expires_in&&acct.expires_in.includes('expired')?'exp-red':'')}${acct.account_id?kv('Account ID',acct.account_id):''}${kv('Auth file',acct.auth_path||'—')}${acct.providers?kv('Providers',acct.providers.map(p=>`${p.name} (${p.type}${p.has_key?', has-key':''})`).join(', ')):''}${acct.scopes?kv('Scopes',acct.scopes.join(', ')):''}${acct.error?kv('Error',acct.error,'exp-red'):''}`);const usageHtml=sect('Usage today',`${kv('Used %',cli.used_pct+'%')}${kv('Cap %',cli.cap_pct+'%')}${kv('Today $',`$${(cli.today_usd||0).toFixed(4)}`)}${kv('Tokens',cli.today_tokens?cli.today_tokens.toLocaleString():'—')}${kv('Calls',cli.calls_today||'—')}${kv('Model used',cli.model||'—')}${kv('Model chain',(cli.model_chain||[]).join(' → '))}${u.pulled_at?kv('Pulled at',u.pulled_at+' ('+(u.pull_elapsed_s||'?')+'s)'):''}${u.all_time_usd?kv('All time $',`$${u.all_time_usd}`):''}${u.all_time_tokens?kv('All time tok',u.all_time_tokens.toLocaleString()):''}${u.raw?kv('Raw source',JSON.stringify(u.raw)):''}`);const cliHtml=sect('CLI binary',`${kv('Installed',cli.installed?'yes':'no')}${kv('Version',cli.version||'—')}${kv('Blocked',cli.blocked?'⛔ YES (cap=0)':'no',cli.blocked?'exp-red':'')}`);const recHtml=sect('Recent runs',recent.length?recent.map(r=>{const a=(r.agents||{})[name];const sts=a?(typeof a==='object'?a.status:a):'—';const cls=sts==='done'?'pill green':sts==='failed'?'pill red':sts==='in_progress'?'pill amber':'pill slate';return `<div style="margin:3px 0"><span class="${cls}" style="margin-right:8px">${sts}</span><a href="javascript:openRun('${r.id}')" style="color:var(--fg)">${r.id}</a> · <span style="color:var(--muted)">${r.scope}</span></div>`;}).join(''):'(none)');$('drawer-body').innerHTML=acctHtml+usageHtml+cliHtml+recHtml;}
+async function openSettings(){const r=await fetch('/api/budget');const b=r.ok?await r.json():{};const cli_inputs=Object.keys(b.caps_pct||{}).map(c=>`<div class="set-row"><label class="set-lbl">${c}</label><input type="range" min="0" max="100" step="5" value="${b.caps_pct[c]}" id="cap-${c}" oninput="document.getElementById('cap-v-${c}').textContent=this.value+'%'"><span id="cap-v-${c}" style="min-width:40px;color:var(--violet);font-weight:600">${b.caps_pct[c]}%</span></div>`).join('');const chain_inputs=Object.keys(b.model_chains||{}).map(c=>`<div class="set-row"><label class="set-lbl">${c}</label><input type="text" id="chain-${c}" value="${(b.model_chains[c]||[]).join(', ')}" style="flex:1"></div>`).join('');$('settings-body').innerHTML=`<div class="set-section"><div class="set-h">Caps (% of full quota usable; 0 = HARD BLOCK)</div>${cli_inputs}</div><div class="set-section"><div class="set-h">Model chains (comma-separated, primary → fallback → ...)</div>${chain_inputs}</div><div class="set-section"><div class="set-h">Parallel max</div><div class="set-row"><label class="set-lbl">parallel_max</label><input type="number" id="parallel-max" min="1" max="50" value="${b.parallel_max||20}" style="width:80px"></div></div>`;$('settings-modal').classList.add('on');}
+function closeSettings(){$('settings-modal').classList.remove('on')}
+async function saveSettings(){const caps={};document.querySelectorAll('[id^=cap-]').forEach(el=>{if(el.id.startsWith('cap-v-'))return;const c=el.id.slice(4);caps[c]=parseInt(el.value);});const chains={};document.querySelectorAll('[id^=chain-]').forEach(el=>{const c=el.id.slice(6);chains[c]=el.value.split(',').map(s=>s.trim()).filter(Boolean);});const pm=parseInt($('parallel-max').value)||20;const r=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({caps_pct:caps,model_chains:chains,parallel_max:pm})});const j=await r.json();if(j.ok){toast('💾 Budget saved');closeSettings();refresh();}else{toast('Save failed: '+(j.error||'unknown'));}}function closeDrawer(){$('drawer').classList.remove('on')}function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),5000)}async function refreshUsage(){const btn=$('refresh');btn.classList.add('spinning');btn.disabled=true;try{const r=await fetch('/api/usage/refresh',{method:'POST'});const j=await r.json();if(j.ok){toast('✓ Usage refreshed');refresh();}else{toast('Refresh failed: '+(j.error||j.stderr||'unknown'));}}catch(e){toast('Refresh error: '+e.message);}finally{btn.classList.remove('spinning');btn.disabled=false;}}$('refresh').onclick=refreshUsage;$('settings').onclick=openSettings;$('orch').onclick=()=>openModal('orchestrate');$('run').onclick=()=>openModal('parallel');$('pause').onclick=pauseAll;refresh();startSSE();"""
 
-BODY = '<div class="wrap"><header><h1>cqc · <span class="dot green" id="conn"></span> live <small id="ver"></small> <small id="usage-meta" style="margin-left:12px"></small></h1><div class="actions"><button id="refresh" title="Pull real ccusage data">🔄 Refresh</button><button id="orch" style="border-color:var(--violet);color:var(--violet)">▶ Orchestrate (20p)</button><button id="run">▶ Run Audit</button><button class="danger" id="pause">⏸ Pause All</button></div></header><div class="tiles" id="tiles"></div><section><h2>Active runs</h2><div id="active"></div></section><div class="split"><section><h2>Recent runs</h2><div class="pills" id="recent"></div></section><div class="spend"><div class="lab">Total spend (7d)</div><div class="big" id="spend-total">$0.00</div><div class="spark" id="spark"></div></div></div><footer><span id="foot-l">connecting…</span><span id="foot-r"></span></footer></div><div class="modal" id="modal"><div class="box"><h3 id="modal-title">Run audit</h3><div id="cli-checks"></div><input type="text" id="scope" value="." placeholder="scope (default .)"><div id="mp-row" style="margin-top:8px;display:none"><label>Max parallel agents</label><input type="number" id="mp" value="20" min="1" max="50"></div><div class="row"><button class="btn-x" onclick="closeModal()">Cancel</button><button onclick="confirmRun()">Confirm</button></div></div></div><div class="drawer" id="drawer"><div class="panel"><h3 id="drawer-title"></h3><pre id="drawer-body"></pre><div style="text-align:right;margin-top:10px"><button class="btn-x" onclick="closeDrawer()">Close</button></div></div></div><div class="toast" id="toast"></div>'
+BODY = '<div class="wrap"><header><h1>cqc · <span class="dot green" id="conn"></span> live <small id="ver"></small> <small id="usage-meta" style="margin-left:12px"></small></h1><div class="actions"><button id="settings" title="Edit caps & model chains">⚙ Settings</button><button id="refresh" title="Pull real ccusage data">🔄 Refresh</button><button id="orch" style="border-color:var(--violet);color:var(--violet)">▶ Orchestrate (20p)</button><button id="run">▶ Run Audit</button><button class="danger" id="pause">⏸ Pause All</button></div></header><div class="tiles" id="tiles"></div><section><h2>Active runs</h2><div id="active"></div></section><div class="split"><section><h2>Recent runs</h2><div class="pills" id="recent"></div></section><div class="spend"><div class="lab">Total spend (7d)</div><div class="big" id="spend-total">$0.00</div><div class="spark" id="spark"></div></div></div><footer><span id="foot-l">connecting…</span><span id="foot-r"></span></footer></div><div class="modal" id="modal"><div class="box"><h3 id="modal-title">Run audit</h3><div id="cli-checks"></div><input type="text" id="scope" value="." placeholder="scope (default .)"><div id="mp-row" style="margin-top:8px;display:none"><label>Max parallel agents</label><input type="number" id="mp" value="20" min="1" max="50"></div><div class="row"><button class="btn-x" onclick="closeModal()">Cancel</button><button onclick="confirmRun()">Confirm</button></div></div></div><div class="drawer" id="drawer"><div class="panel"><h3 id="drawer-title"></h3><div id="drawer-body"></div><div style="text-align:right;margin-top:10px"><button class="btn-x" onclick="closeDrawer()">Close</button></div></div></div><div class="modal" id="settings-modal"><div class="box" style="width:560px;max-height:80vh;overflow:auto"><h3>⚙ Budget &amp; Model Chains</h3><div id="settings-body">Loading…</div><div class="row"><button class="btn-x" onclick="closeSettings()">Cancel</button><button onclick="saveSettings()">💾 Save</button></div></div></div><div class="toast" id="toast"></div>'
 
 VARS = "--green:#22c55e;--amber:#f59e0b;--red:#ef4444;--slate:#64748b;--violet:#8b5cf6;--bg:#0a0d12;--card:#14181f;--border:#2a2f3b;--fg:#e6e8eb;--muted:#8b93a1"
 
@@ -325,6 +463,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _send_json(self, 200, get_metrics()); return
         if path == "/api/usage":
             _send_json(self, 200, load_usage()); return
+        if path == "/api/budget":
+            _send_json(self, 200, load_budget()); return
+        m = re.match(r"^/api/account/([a-z]+)$", path)
+        if m:
+            cli = m.group(1)
+            if cli not in CLIS: _send_json(self, 400, {"error":"unknown cli"}); return
+            _send_json(self, 200, get_account_info(cli)); return
         if path == "/api/stream":
             self._stream(); return
         m = re.match(r"^/api/log/([^/]+)/([^/]+)$", path)
@@ -364,6 +509,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _send_json(self, 400, {"error": "bad id"}); return
             ok = cancel_run(rid)
             _send_json(self, 200, {"cancelled": ok}); return
+        if path == "/api/budget":
+            try:
+                body = json.loads(raw.decode() or "{}")
+            except Exception:
+                _send_json(self, 400, {"error": "invalid json"}); return
+            # Validate
+            current = load_budget()
+            allowed_keys = {"caps_pct", "models", "model_chains", "parallel_max", "shard_max_files"}
+            for k, v in body.items():
+                if k in allowed_keys: current[k] = v
+            # Validate caps are 0-100 ints
+            for cli, cap in (current.get("caps_pct") or {}).items():
+                try:
+                    cap = int(cap)
+                    if cap < 0 or cap > 100:
+                        _send_json(self, 400, {"error": f"cap {cli}={cap} out of [0,100]"}); return
+                    current["caps_pct"][cli] = cap
+                except (TypeError, ValueError):
+                    _send_json(self, 400, {"error": f"cap {cli} not numeric"}); return
+            current["version"] = current.get("version", 2)
+            try:
+                tmp = BUDGET_FILE + ".tmp"
+                with open(tmp, "w") as f: json.dump(current, f, indent=2)
+                os.replace(tmp, BUDGET_FILE)
+            except Exception as e:
+                _send_json(self, 500, {"error": f"write failed: {e}"}); return
+            _send_json(self, 200, {"ok": True, "saved_to": BUDGET_FILE, "budget": current}); return
         if path == "/api/usage/refresh":
             try:
                 r = subprocess.run(["cqc-usage-pull"], capture_output=True, text=True, timeout=120)

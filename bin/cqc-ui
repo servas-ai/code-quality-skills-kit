@@ -11,7 +11,7 @@ umask 077
 
 PORT="${CQC_UI_PORT:-4020}"
 TARGET="."
-VERSION="v3.14"
+VERSION="v3.17"
 BIND="${CQC_UI_BIND:-0.0.0.0}"   # bind to all interfaces incl. Tailscale
 
 while [ "${1:-}" != "" ]; do
