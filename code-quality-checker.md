@@ -310,6 +310,143 @@ echo "audit-reports/" >> .gitignore
 
 See `install.sh` for the one-line bootstrap.
 
+## 0.7 Autonomous Audit Plan (smart pre-flight)
+
+**Before dispatching any sub-agent**, the orchestrator does codebase reconnaissance and writes a tailored plan to `${RUN_DIR}/_audit-plan.md`. This is what makes the kit smart on first invocation — no manual config required.
+
+### Pre-flight reconnaissance (≤10 s)
+
+Compute these metrics from the file inventory:
+
+```bash
+# File counts per category
+COUNT_COMPONENTS=$(jq '[.files | to_entries[] | select(.key | test("components/"))] | length' _run.json)
+COUNT_HOOKS=$(jq '[.files | to_entries[] | select(.key | test("hooks/|/use[A-Z]"))] | length' _run.json)
+COUNT_TESTS=$(jq '[.files | to_entries[] | select(.key | test("\\.test\\.|__tests__/"))] | length' _run.json)
+COUNT_CONFIG=$(jq '[.files | to_entries[] | select(.key | test("config|\\.json$|tsconfig"))] | length' _run.json)
+COUNT_DOCS=$(jq '[.files | to_entries[] | select(.key | test("\\.md$"))] | length' _run.json)
+
+# Hot-files: changed in last 30 days, weighted by mod-count
+HOT_FILES=$(jq '.files | to_entries | sort_by(-.value.mods30d) | .[0:20]' _run.json)
+
+# Stack signals
+HAS_REACT=$(jq -r '.tools.react // false' _run.json)
+HAS_TAILWIND=$([ -f tailwind.config.* ] && echo true || echo false)
+HAS_REACT_QUERY=$(grep -q "@tanstack/react-query\|swr" package.json 2>/dev/null && echo true || echo false)
+HAS_PRISMA=$([ -f prisma/schema.prisma ] && echo true || echo false)
+HAS_GHA=$([ -d .github/workflows ] && echo true || echo false)
+HAS_TS=$([ -f tsconfig.json ] && echo true || echo false)
+HAS_I18N=$(grep -q "next-intl\|react-i18next\|formatjs" package.json 2>/dev/null && echo true || echo false)
+```
+
+### Skip rules (auto-applied)
+
+| Skill | Skip if | Reason |
+|-------|---------|--------|
+| d2 types | `!HAS_TS` | no TypeScript = no typecheck to run |
+| d3 tests | `COUNT_TESTS == 0` | no test files = nothing to run |
+| d7 a11y | `!HAS_REACT && COUNT_COMPONENTS == 0` | no UI to audit |
+| d10 ci | `!HAS_GHA` | no workflows to verify |
+| d11 i18n | `!HAS_I18N && language_policy.ui_strings != "extracted"` | no extraction policy = no work |
+| d12 deps | `!has package.json && !pyproject.toml && !Cargo.toml` | no deps to audit |
+| d13 cache | `!HAS_REACT_QUERY` | no cache layer to audit |
+| d14 css | `!HAS_TAILWIND` | no design tokens to drift |
+| d15 flags | `! grep -q "useFeatureFlag\|getFlag" src/` | no flag system in use |
+
+Skipped skills get `status: "skipped"` with `reason: "<rule>"` in `_run.json:agents`. They do NOT count against coverage but DO count against weight (their weight is redistributed proportionally to active skills).
+
+### Auto-tuned weights
+
+The orchestrator scales each skill's weight by its **relevance signal**:
+
+```
+weight_d6  = base × (1 + log10(total_files / 100))      # more files = more architecture risk
+weight_d12 = base × (1 + log10(deps_count / 20))        # more deps = more deps risk
+weight_d7  = base × (component_count / total_files)     # heavier if mostly UI
+weight_d4  = base × (1 + 0.5 × auth_signals_detected)   # heavier if auth code present
+```
+
+`base` = the value from `agents.<skill>.weight` in the seed. Changes never exceed ±50 %.
+
+### Wall-time estimate
+
+```
+estimated_seconds = sum(per_skill_seconds)
+per_skill_seconds = 30 + 0.3 × files_for_skill   # 30s overhead + 0.3s/file
+                  + (90 if requires_tools else 0) # tool startup
+```
+
+Print the estimate before dispatch:
+
+```
+📋 Audit plan ready · 13 skills active · 2 skipped (d10 no GHA, d14 no Tailwind)
+   Estimated wall-time: 8 min · Files in scope: 211 · Critical-Cap: ON
+   See _audit-plan.md for the full plan.
+```
+
+### Auto-derived invariants
+
+If `cqc.config.yaml` has empty `invariants: []`, derive them from CLAUDE.md / AGENTS.md:
+
+```bash
+# Find "DO NOT BUILD" / "Invariants" / "must" sections
+rg -A 20 "^#+\s*(DO NOT BUILD|Invariants?|Must|Promises?)" CLAUDE.md AGENTS.md README.md 2>/dev/null \
+  | rg "^\s*[-*]\s+" \
+  | head -10
+```
+
+Each bullet → invariant entry with `verify: "<grep-derived-rule>"` (best-effort; user can edit `_profile.yaml` after).
+
+### Hot-file priority
+
+Files touched in last 30 days get audited FIRST within each skill (sorted by `mods30d` desc). Surfaces regressions in actively-changing code rather than stale areas.
+
+### Sample-cap on huge repos
+
+If `total_files > 1000`: each skill audits **top 200 hot-files only** (sampled by `mods30d × loc`). The remaining files go through the inline coverage-sweeper (Phase 2.1) which is fast (5 quick checks per file).
+
+### `_audit-plan.md` format
+
+```markdown
+# Audit Plan — <run_id> — <scope>
+
+## Codebase shape (auto-detected)
+- 211 files · 8 langs · 47 components · 31 hooks · 23 tests · monorepo: yes
+- Stack: Next.js 16, React 19, vitest, pnpm
+- Active 30 d: 38 files (top 5 in hotspots/)
+
+## Skills (15 total)
+ACTIVE (13):
+  d1 Correctness     · 47 files · weight 15·1.0 = 15 · ~45 s
+  d2 Types           · 211 files · weight 12·1.0 = 12 · ~150 s (runs pnpm typecheck)
+  d3 Tests           · 23 test files · weight 12 · ~90 s
+  d4 Security        · 211 files · weight 12·1.2 = 14 · ~50 s (LAST)
+  d5 Performance     · 211 files · weight 10 · ~120 s (runs pnpm build)
+  d6 Architecture    · 211 files · weight 10·1.3 = 13 · ~50 s
+  d7 A11y            · 47 components · weight 10·0.22 = 2.2 · ~30 s
+  d8 Dead-code       · 211 files · weight 8 · ~40 s
+  d9 Docs            · 23 md files · weight 6 · ~25 s
+  d11 i18n           · 47 components · weight 6 · ~25 s
+  d12 Deps           · 89 packages · weight 6 · ~80 s (runs pnpm audit)
+  d13 Cache          · @tanstack/react-query detected · weight 8 · ~30 s
+  d15 Flags          · useFeatureFlag detected · weight 4 · ~20 s
+
+SKIPPED (2):
+  d10 CI Health      · skipped: no .github/workflows/ found
+  d14 CSS Tokens     · skipped: no tailwind.config.* found
+
+## Estimated wall-time: 8 min (parallel where possible)
+
+## Auto-derived invariants (from CLAUDE.md)
+- ✅ All API calls go through src/lib/api.ts
+- ✅ OnlyAPI mock-only safety lock
+- ✅ DO NOT BUILD: tickets, automations, billing, admin
+
+## Critical-Cap: ON (1 critical → score ≤40)
+```
+
+This plan file is your **first deliverable** after Phase 0.7. The user can review it and abort with Ctrl-C before any sub-agent is spawned.
+
 ---
 
 # Phase 1 — Seed `_run.json`
