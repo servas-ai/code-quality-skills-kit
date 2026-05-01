@@ -210,6 +210,93 @@ Same atomic-RW protocol.
 
 ---
 
+# Phase -1 — ASCII Banner + CLI Usage Dashboard (FIRST output)
+
+**Before any other phase**, print this ASCII banner + a CLI-usage table. This is the user's first contact with the run, so it must be:
+1. Visually clear (ASCII art for character)
+2. Informative (which CLIs are available, how much budget left)
+3. Fast (≤2 s — no network calls beyond cached usage tools)
+
+## Banner
+
+```
+   ╭──────────────────────────────────────────────────────────────────╮
+   │                                                                  │
+   │   ██████╗ ██████╗  ██████╗      Multi-Agent Code Quality         │
+   │  ██╔════╝██╔═══██╗██╔════╝      Audit Kit · v3.5                 │
+   │  ██║     ██║   ██║██║           ─────────────────────────────    │
+   │  ██║     ██║▄▄ ██║██║           One prompt · Any codebase        │
+   │  ╚██████╗╚██████╔╝╚██████╗      15 dimensions · parallel CLIs    │
+   │   ╚═════╝ ╚══▀▀═╝  ╚═════╝      Critical-Cap · 99% coverage      │
+   │                                                                  │
+   ╰──────────────────────────────────────────────────────────────────╯
+
+   github.com/servas-ai/code-quality-skills-kit · MIT
+```
+
+## CLI usage dashboard (probed live, ≤2 s)
+
+For each detected CLI, probe its usage and render a compact bar chart. **Cache results in `~/.cache/cqc-cli-usage.json`** (10-min TTL) to avoid repeated probes.
+
+### Probe commands per CLI
+
+```bash
+# claude (via ccusage — install on demand if missing)
+WEEK=$(npx --yes -q ccusage@latest weekly --json 2>/dev/null \
+  | jq -r '.weekly[-1] | "\(.totalTokens) \(.totalCost)"' 2>/dev/null \
+  || echo "0 0")
+DAY=$(npx --yes -q ccusage@latest daily --json 2>/dev/null \
+  | jq -r '.daily[-1] | "\(.totalTokens) \(.totalCost)"' 2>/dev/null \
+  || echo "0 0")
+
+# gemini (Code Assist via state.json — quota lookup not yet exposed; show "n/a")
+GEMINI_DAY="n/a"
+
+# opencode (stats command, requires authenticated session)
+OC_DAY=$(timeout 5 opencode stats --json 2>/dev/null | jq -r '.daily // "n/a"' 2>/dev/null || echo "n/a")
+
+# codex (history.jsonl event count from last 7 d, 24 h)
+CODEX_WEEK=$(jq -r --argjson c "$(date -d '7 days ago' +%s)" \
+  'select(.ts > $c)' ~/.codex/history.jsonl 2>/dev/null | jq -s 'length')
+CODEX_DAY=$(jq -r --argjson c "$(date -d '24 hours ago' +%s)" \
+  'select(.ts > $c)' ~/.codex/history.jsonl 2>/dev/null | jq -s 'length')
+```
+
+### Rendered output
+
+```
+   CLI Agents · usage rollup (probed @ 2026-05-01 22:42)
+   ──────────────────────────────────────────────────────────────────
+   ✅ claude    v2.1.126  ████████████░░░░░░  $46.02 today · $52.71 week · plan: api
+   ✅ gemini    v0.40.1   ░░░░░░░░░░░░░░░░░░  no quota API · OAuth flow active
+   ✅ opencode  v1.14.29  ███░░░░░░░░░░░░░░░  127 evts today · auth: pro
+   ✅ codex     v0.125.0  █░░░░░░░░░░░░░░░░░    5 evts week  · auth: chatgpt
+   ──────────────────────────────────────────────────────────────────
+   Mode: multi-cli (4 detected) · Skills will fan out across all 4
+```
+
+Bar formula: `bar_width = min(18, round(usage / max_observed × 18))`. Solid blocks `█` for used, light blocks `░` for remaining.
+
+### Rendering rules
+
+- **Width: 70 chars** (fits in any terminal)
+- **No colour** when stdout is not a TTY (CI mode auto-detected)
+- **Skip the banner with `--quiet`** for scripted use; still print 1-line CLI summary
+- **Skip on resume** (re-run of same RUN_ID) — banner only on cold start
+
+## Quota warnings
+
+If any CLI shows >80 % of plan limit, print a yellow warning before dispatch:
+
+```
+   ⚠️  claude usage at 87 % of weekly $200 cap — consider --no-tools to save tokens
+   ⚠️  codex usage at 92 % of daily limit — will fan out to opencode/gemini for codex skills
+```
+
+When a quota is exceeded, **redistribute that CLI's skills** to the next-best CLI in the dispatch matrix.
+
+---
+
 # Phase 0.0 — Interactive Onboarding (4 questions, smart defaults)
 
 When the user invokes `/code-quality-checker` for the **first time** in a repo (no `cqc.config.yaml` and no prior `audit-reports/` history), ask these 4 questions via `AskUserQuestion`. Otherwise skip — re-use prior answers from `cqc.config.yaml`.
