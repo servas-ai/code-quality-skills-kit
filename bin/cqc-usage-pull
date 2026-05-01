@@ -125,36 +125,92 @@ def pull_codex_ratelimits():
 
 
 def pull_codex():
-    """ccusage tokens + JSONL ratelimits (REAL %)"""
+    """ccusage tokens + JSONL ratelimits (REAL %) + ChatGPT plan from JWT"""
     data, err = run_json(["bun", "x", "@ccusage/codex@latest", "daily", "--json"], timeout=60)
     if err: return None, err
     daily = data.get("daily", [])
     today_row = _today_row(daily)
     totals = data.get("totals", {})
     rl = pull_codex_ratelimits()
+    # Decode JWT for subscription
+    sub = None
+    try:
+        with open(os.path.expanduser("~/.codex/auth.json")) as f: a = json.load(f)
+        tok = (a.get("tokens") or {}).get("id_token", "")
+        if tok and "." in tok:
+            import base64
+            payload = tok.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            jwt = json.loads(base64.urlsafe_b64decode(payload).decode())
+            auth_meta = jwt.get("https://api.openai.com/auth", {})
+            sub = {
+                "plan":  ("ChatGPT Pro" if auth_meta.get("chatgpt_plan_type") == "pro"
+                          else f"ChatGPT {auth_meta.get('chatgpt_plan_type','—')}"),
+                "tier":  auth_meta.get("chatgpt_plan_type"),
+                "subscription_active_start": auth_meta.get("chatgpt_subscription_active_start"),
+                "subscription_active_until": auth_meta.get("chatgpt_subscription_active_until"),
+                "account_id":   auth_meta.get("chatgpt_account_id"),
+                "limits": {
+                    "5h GPT-5.4":         "100–500 msgs (Pro 5x) / up to 2,000 (Pro 20x)",
+                    "5h GPT-5.4-mini":    "1,200–7,000 msgs",
+                    "5h GPT-5.3-Codex":   "600–3,000 msgs",
+                    "5h cloud tasks":     "200–1,200",
+                    "Weekly":             "sliding 7d, server-enforced",
+                },
+                "reset_5h":  "rolling 5h from session start",
+                "reset_weekly": "sliding 7-day window",
+                "billing":   "monthly subscription ($20 Plus / $200 Pro 5x / $400 Pro 20x)",
+            }
+    except Exception: pass
+    # Compute resets_at for primary/secondary if we have ratelimits
+    if rl:
+        try:
+            ts = datetime.fromisoformat(rl["source_ts"].replace("Z", "+00:00")).timestamp()
+            for window in ("primary", "secondary"):
+                w = rl.get(window)
+                if w and w.get("resets_at"):
+                    # codex stores resets_at as unix timestamp
+                    rl[window]["resets_at_iso"] = datetime.fromtimestamp(w["resets_at"], tz=timezone.utc).isoformat()
+        except Exception: pass
     return {
         "today_usd":     round(today_row.get("costUSD", 0.0), 4),
         "today_tokens":  today_row.get("totalTokens", 0),
         "model_used":    next(iter(today_row.get("models", {})), None),
         "all_time_usd":  round(totals.get("costUSD", 0.0), 2),
         "all_time_tokens": totals.get("totalTokens", 0),
-        "ratelimits":    rl,  # REAL 5h+weekly from sessions
+        "ratelimits":    rl,
+        "subscription":  sub,
         "raw": {"date": today_row.get("date"), "models": list((today_row.get("models") or {}).keys())},
     }, None
 
 
 def pull_opencode():
-    """bun x @ccusage/opencode@latest daily --json"""
+    """ccusage tokens + opencode-go subscription (no public API for live usage)"""
     data, err = run_json(["bun", "x", "@ccusage/opencode@latest", "daily", "--json"], timeout=60)
     if err: return None, err
     daily = data.get("daily", [])
     today_row = _today_row(daily)
     totals = data.get("totals", {})
+    sub = {
+        "plan":           "OpenCode Go ($10/mo)",
+        "tier":           "go",
+        "price_usd_month": 10.0,
+        "limits": {
+            "5h rolling":   "$ pool (replenishes every 5h)",
+            "Free tier":    "200 req / 5h",
+            "Models":       "GLM-5.1, GLM-5, Kimi-K2.6, MiMo, Qwen3.6, MiniMax, DeepSeek-V4-Pro",
+        },
+        "reset_5h":   "rolling 5h pool (no calendar reset)",
+        "billing":    "monthly $10 (1st month $5)",
+        "source":     "opencode.ai/go (no public usage API — see issue #10448)",
+        "console_url": "https://opencode.ai/auth",
+    }
     return {
         "today_usd":     round(today_row.get("costUSD", 0.0), 4),
         "today_tokens":  today_row.get("totalTokens", 0),
         "model_used":    next(iter(today_row.get("models", {})), None),
         "all_time_tokens": totals.get("totalTokens", 0),
+        "subscription":  sub,
         "raw": {"date": today_row.get("date"), "models": list((today_row.get("models") or {}).keys())},
     }, None
 
@@ -229,10 +285,90 @@ def pull_claude():
         out["seven_day_opus"]   = usage.get("seven_day_opus")
         out["needs_relogin"] = oauth.get("needs_relogin", False)
         out["oauth_error"]   = oauth.get("profile_error") or oauth.get("usage_error")
+        # Subscription block
+        plan_label = ("Claude Max 20x" if org.get("rate_limit_tier") == "default_claude_max_20x"
+                      else "Claude Max 5x" if org.get("rate_limit_tier") == "default_claude_max_5x"
+                      else "Claude Pro" if prof.get("has_claude_pro")
+                      else "Claude")
+        # Estimate renewal: subscription_created_at + monthly anniversary
+        renews_at = None
+        sca = org.get("subscription_created_at") or prof.get("created_at")
+        if sca:
+            try:
+                t0 = datetime.fromisoformat(sca.replace("Z", "+00:00"))
+                # Monthly anniversary: bump month, handle year wrap
+                now = datetime.now(timezone.utc)
+                year, month = now.year, now.month
+                day = t0.day
+                # Try this month first
+                from calendar import monthrange
+                # Find next anniversary
+                while True:
+                    ml = monthrange(year, month)[1]
+                    candidate = t0.replace(year=year, month=month, day=min(day, ml))
+                    if candidate > now: break
+                    month += 1
+                    if month > 12: month = 1; year += 1
+                renews_at = candidate.isoformat()
+            except Exception: pass
+        out["subscription"] = {
+            "plan":               plan_label,
+            "tier":               org.get("rate_limit_tier"),
+            "subscription_status": org.get("subscription_status"),
+            "billing_type":       org.get("billing_type"),
+            "subscription_started_at": org.get("subscription_created_at"),
+            "subscription_renews_at_estimated": renews_at,
+            "limits": {
+                "5h messages":  "~900 msgs/5h (Max 20x)",
+                "Weekly":       "~240–480h Sonnet equiv. / ~24–40h Opus",
+                "Monthly est.": "~45,000 msgs",
+            },
+            "reset_5h":     "rolling 5h from session start",
+            "reset_weekly": "sliding 7-day window",
+            "billing":      f"$200/mo Max 20x · renews monthly",
+            "source":       "api.anthropic.com/api/oauth/profile",
+        }
     elif err:
         out["oauth_error"] = err
         out["needs_relogin"] = "missing" in (err or "")
     return out, None
+
+
+GEMINI_PLAN_LIMITS = {
+    "ultra": {
+        "name": "Google AI Ultra",
+        "price_usd_month": 249.99,
+        "limits": {
+            "Gemini 3 Pro / 3.1 Pro":     "500 prompts/day",
+            "Thinking mode":               "1,500 prompts/day",
+            "Gemini CLI requests":         "2,000 req/day",
+            "Deep Research":               "120 reports/day",
+            "Image gen (Nano Banana)":     "1,000 imgs/day",
+            "Veo 3.1 video":               "5/day",
+            "Fast (2.5 Flash)":            "Unlimited",
+        },
+        "reset": "Daily (no fixed time, distributed throughout day)",
+    },
+    "pro": {
+        "name": "Google AI Pro",
+        "price_usd_month": 19.99,
+        "limits": {
+            "Gemini 3 Pro / 3.1 Pro":     "100 prompts/day",
+            "Gemini CLI requests":         "1,500 req/day",
+            "Fast (2.5 Flash)":            "Unlimited",
+        },
+        "reset": "Daily",
+    },
+    "free": {
+        "name": "Google AI (Free)",
+        "price_usd_month": 0.0,
+        "limits": {
+            "Gemini CLI requests":         "1,000 req/day",
+            "Gemini 2.5 Flash":            "10 req/min, 250 req/day",
+        },
+        "reset": "Daily",
+    },
+}
 
 
 def pull_gemini():
@@ -278,17 +414,50 @@ def pull_gemini():
                     auth_error = "access token expired AND no refresh token"
         except Exception as e:
             auth_error = str(e)
+    # Email + Google profile from /userinfo
+    email = None
+    full_name = None
+    pic = None
+    try:
+        oc_data = json.load(open(oc)) if os.path.isfile(oc) else {}
+        tok_g = oc_data.get("access_token")
+        if tok_g:
+            import urllib.request
+            try:
+                req = urllib.request.Request("https://www.googleapis.com/oauth2/v3/userinfo",
+                                             headers={"Authorization": f"Bearer {tok_g}"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    p = json.loads(r.read().decode())
+                    email = p.get("email")
+                    full_name = p.get("name")
+                    pic = p.get("picture")
+            except Exception: pass
+    except Exception: pass
+    # Plan: assume Ultra (user said so); allow override via CQC_GEMINI_PLAN env
+    plan_tier = os.environ.get("CQC_GEMINI_PLAN", "ultra")
+    plan_info = GEMINI_PLAN_LIMITS.get(plan_tier, GEMINI_PLAN_LIMITS["ultra"])
     return {
         "today_usd":     0.0,
         "today_tokens":  0,
         "sessions_today": sessions_today,
         "calls_today":   None,   # don't fake this
         "model_used":    last_model,
+        "email":         email,
+        "full_name":     full_name,
+        "picture":       pic,
+        "subscription": {
+            "plan":            plan_info["name"],
+            "tier":            plan_tier,
+            "price_usd_month": plan_info["price_usd_month"],
+            "limits":          plan_info["limits"],
+            "reset":           plan_info["reset"],
+            "source":          "hardcoded (Google has no public usage API)",
+        },
         "needs_relogin": needs_relogin,
         "oauth_error":   auth_error,
         "no_quota_api":  True,
         "raw": {"source": "session file count (ROUGH lower bound, NOT real quota)",
-                "note": "Google has no quota API for free-tier OAuth users — see cqc docs."},
+                "note": "Google has no quota API for OAuth users — issue google-gemini/gemini-cli#15248."},
     }, None
 
 
