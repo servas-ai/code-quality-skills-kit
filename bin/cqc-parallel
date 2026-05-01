@@ -212,10 +212,14 @@ echo ""
 echo "${C_BOLD}▸ All agents done · aggregating${C_RST}"
 echo ""
 
-C=$(grep -c '"sev":"c"' "$RUN_DIR/_findings.jsonl" 2>/dev/null || echo 0)
-H=$(grep -c '"sev":"h"' "$RUN_DIR/_findings.jsonl" 2>/dev/null || echo 0)
-M=$(grep -c '"sev":"m"' "$RUN_DIR/_findings.jsonl" 2>/dev/null || echo 0)
-L=$(grep -c '"sev":"l"' "$RUN_DIR/_findings.jsonl" 2>/dev/null || echo 0)
+FF="$RUN_DIR/_findings.jsonl"
+[ ! -f "$FF" ] && touch "$FF"
+C=$(grep -cE '"sev"\s*:\s*"c"' "$FF" 2>/dev/null | head -1 || true); C="${C:-0}"
+H=$(grep -cE '"sev"\s*:\s*"h"' "$FF" 2>/dev/null | head -1 || true); H="${H:-0}"
+M=$(grep -cE '"sev"\s*:\s*"m"' "$FF" 2>/dev/null | head -1 || true); M="${M:-0}"
+L=$(grep -cE '"sev"\s*:\s*"l"' "$FF" 2>/dev/null | head -1 || true); L="${L:-0}"
+# Strip newlines defensively
+C="${C//$'\n'/}"; H="${H//$'\n'/}"; M="${M//$'\n'/}"; L="${L//$'\n'/}"
 TOT=$((C+H+M+L))
 
 # Build agent statuses for _run.json
