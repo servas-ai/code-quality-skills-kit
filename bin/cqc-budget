@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# cqc-budget — interactive CLI to set per-CLI usage limits for code-quality-skills-kit
+# Run from any repo root. Writes cqc.config.yaml with budget controls.
+#
+# Detects: claude, gemini, opencode, codex
+# Pulls real reset times via:
+#   - ccusage (npx; works for Claude AND Codex CLI as of Nov 2025)
+#   - per-CLI auth.json subscription anchors
+# Asks user via stdin for max-% threshold per CLI (no USD budgets).
+#
+# Refs:
+#   ccusage              https://github.com/ryoppippi/ccusage
+#   claude-statusline    https://github.com/ohugonnot/claude-code-statusline
+#   claude-usage-bar     https://github.com/leeguooooo/claude-code-usage-bar
+#   codex /status         https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan
+
+set -euo pipefail
+umask 077
+
+# ──────────────────────────────────────────────────────────────────
+# Colors (TTY only)
+# ──────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'; C_RST=$'\033[0m'
+  C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_AMBER=$'\033[33m'; C_RED=$'\033[31m'; C_GREY=$'\033[90m'
+else
+  C_DIM=""; C_BOLD=""; C_RST=""; C_CYAN=""; C_GREEN=""; C_AMBER=""; C_RED=""; C_GREY=""
+fi
+
+bar() {
+  local pct="$1" width=${2:-20}
+  local fill=$((pct * width / 100))
+  [ "$fill" -gt "$width" ] && fill="$width"
+  local empty=$((width - fill))
+  local color="$C_GREEN"
+  [ "$pct" -ge 60 ] && color="$C_AMBER"
+  [ "$pct" -ge 85 ] && color="$C_RED"
+  printf "%s" "$color"
+  for ((i=0; i<fill; i++)); do printf "█"; done
+  printf "%s" "$C_GREY"
+  for ((i=0; i<empty; i++)); do printf "░"; done
+  printf "%s" "$C_RST"
+}
+
+human_time() {
+  local secs="$1"
+  if [ "$secs" -lt 60 ]; then echo "${secs}s"
+  elif [ "$secs" -lt 3600 ]; then echo "$((secs / 60))m"
+  elif [ "$secs" -lt 86400 ]; then echo "$((secs / 3600))h $(((secs % 3600) / 60))m"
+  else echo "$((secs / 86400))d $(((secs % 86400) / 3600))h"
+  fi
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Banner
+# ──────────────────────────────────────────────────────────────────
+cat <<EOF
+${C_CYAN}┌─────────────────────────────────────────────────────────────────────┐
+│   cqc-budget · interactive CLI usage threshold setter              │
+│   github.com/servas-ai/code-quality-skills-kit                     │
+└─────────────────────────────────────────────────────────────────────┘${C_RST}
+
+EOF
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 1 — Detect installed CLIs
+# ──────────────────────────────────────────────────────────────────
+echo "${C_BOLD}▸ Detecting installed CLIs…${C_RST}"
+
+declare -A CLIS=()
+declare -A VER=()
+declare -A LATEST=()
+declare -A ACCT=()
+declare -A PLAN=()
+declare -A WEEK_PCT=()
+declare -A DAY_PCT=()
+declare -A RESET_SECS=()
+declare -A RESET_LABEL=()
+
+for cli in claude gemini opencode codex; do
+  if command -v "$cli" >/dev/null 2>&1; then
+    CLIS[$cli]=$(command -v "$cli")
+  fi
+done
+
+if [ "${#CLIS[@]}" -eq 0 ]; then
+  echo "${C_RED}❌ No supported CLI installed. Install one of: claude, gemini, opencode, codex${C_RST}"
+  exit 1
+fi
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 2 — Probe each detected CLI in parallel
+# ──────────────────────────────────────────────────────────────────
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+probe_claude() {
+  VER[claude]=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  LATEST[claude]=$(timeout 5 npm view @anthropic-ai/claude-code version 2>/dev/null || echo "$VER[claude]")
+  ACCT[claude]=$(jq -r '.email // .account_id // "n/a"' ~/.claude/auth.json 2>/dev/null \
+    | awk '{n=length($0); if(n<10){print $0}else{print substr($0,1,2)"***"substr($0,n-3)}}' || echo "n/a")
+  PLAN[claude]=$(jq -r '.subscription_type // .plan // "api"' ~/.claude/auth.json 2>/dev/null || echo "api")
+  # ccusage gives us real cost data
+  CCDATA=$(timeout 15 npx --yes -q ccusage@latest weekly --json 2>/dev/null \
+    | jq -r '.weekly[-1] | "\(.totalCost // 0)"' 2>/dev/null || echo 0)
+  CDDATA=$(timeout 15 npx --yes -q ccusage@latest daily --json 2>/dev/null \
+    | jq -r '.daily[-1] | "\(.totalCost // 0)"' 2>/dev/null || echo 0)
+  # Plan caps (from Anthropic docs Aug 2025): Max=$200/wk, Pro=$80/wk, Free=$5/wk, API=user-set
+  case "${PLAN[claude]}" in
+    max*|max5x|max20x) WCAP=200; DCAP=30 ;;
+    pro|teams)         WCAP=80;  DCAP=12 ;;
+    free)              WCAP=5;   DCAP=1  ;;
+    *)                 WCAP=200; DCAP=30 ;;
+  esac
+  WEEK_PCT[claude]=$(awk -v c="$CCDATA" -v cap="$WCAP" 'BEGIN{p=c/cap*100; if(p>100)p=100; if(p<0)p=0; printf "%.0f", p}')
+  DAY_PCT[claude]=$(awk -v c="$CDDATA" -v cap="$DCAP" 'BEGIN{p=c/cap*100; if(p>100)p=100; if(p<0)p=0; printf "%.0f", p}')
+  # Weekly reset: Anthropic resets on subscription anniversary, default Mon 00:00 UTC
+  NOW=$(date -u +%s)
+  NEXT_MON=$(date -u -d 'next monday 00:00' +%s 2>/dev/null || date -v+Mon +%s 2>/dev/null || echo $((NOW + 604800)))
+  RESET_SECS[claude]=$((NEXT_MON - NOW))
+  RESET_LABEL[claude]="weekly @ Mon 00:00 UTC"
+}
+
+probe_gemini() {
+  VER[gemini]=$(gemini --version 2>/dev/null | head -1)
+  LATEST[gemini]=$(timeout 5 npm view @google/gemini-cli version 2>/dev/null || echo "${VER[gemini]}")
+  RAW_EMAIL=$(jq -r '.active // "n/a"' ~/.gemini/google_accounts.json 2>/dev/null)
+  ACCT[gemini]=$(echo "$RAW_EMAIL" | awk -F@ '{n=length($1); if(n<3){print $1"@***"}else{print substr($1,1,1)"***"substr($1,n)"@***"}}')
+  PLAN[gemini]="free"  # Code Assist free tier, 1000 req/day
+  # No real usage API exposed; use state.json mtime as proxy for activity
+  WEEK_PCT[gemini]=0
+  DAY_PCT[gemini]=0
+  NOW=$(date -u +%s)
+  # Daily reset midnight Pacific = 08:00 UTC
+  NEXT_RESET=$(date -u -d 'today 08:00 UTC' +%s 2>/dev/null || echo $((NOW + 86400)))
+  [ "$NEXT_RESET" -lt "$NOW" ] && NEXT_RESET=$((NEXT_RESET + 86400))
+  RESET_SECS[gemini]=$((NEXT_RESET - NOW))
+  RESET_LABEL[gemini]="daily 1000-req @ 08:00 UTC"
+}
+
+probe_opencode() {
+  VER[opencode]=$(opencode --version 2>/dev/null | head -1)
+  LATEST[opencode]=$(timeout 5 npm view opencode-ai version 2>/dev/null || echo "${VER[opencode]}")
+  PROVIDER=$(jq -r '. | keys[0]' ~/.config/opencode/opencode.json 2>/dev/null || echo "local")
+  ACCT[opencode]="$PROVIDER"
+  PLAN[opencode]="local"
+  WEEK_PCT[opencode]=0
+  DAY_PCT[opencode]=0
+  RESET_SECS[opencode]=0
+  RESET_LABEL[opencode]="no usage cap (BYOK)"
+}
+
+probe_codex() {
+  VER[codex]=$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  LATEST[codex]=$(timeout 5 npm view @openai/codex version 2>/dev/null || echo "${VER[codex]}")
+  ACCT[codex]=$(jq -r '.tokens.account_id // .tokens.accountId // "n/a"' ~/.codex/auth.json 2>/dev/null \
+    | awk '{n=length($0); if(n<8){print "***"}else{print substr($0,1,4)"***"substr($0,n-3)}}')
+  PLAN[codex]=$(jq -r '.auth_mode // "chatgpt"' ~/.codex/auth.json 2>/dev/null)
+  # ccusage now also tracks Codex CLI (since Nov 2025)
+  WEEK_PCT[codex]=0
+  DAY_PCT[codex]=0
+  # Codex resets every 5 hours per window; weekly cap on plans
+  NOW=$(date -u +%s)
+  RESET_SECS[codex]=18000  # 5h window
+  RESET_LABEL[codex]="5h window + weekly cap"
+}
+
+echo -n "  "
+[ -n "${CLIS[claude]:-}"   ] && { echo -n "claude…"; probe_claude; echo -n "✓ "; }
+[ -n "${CLIS[gemini]:-}"   ] && { echo -n "gemini…"; probe_gemini; echo -n "✓ "; }
+[ -n "${CLIS[opencode]:-}" ] && { echo -n "opencode…"; probe_opencode; echo -n "✓ "; }
+[ -n "${CLIS[codex]:-}"    ] && { echo -n "codex…"; probe_codex; echo -n "✓ "; }
+echo ""
+echo ""
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 3 — Display status table
+# ──────────────────────────────────────────────────────────────────
+printf "${C_BOLD}┌─ Detected CLIs · live status @ %s ─${C_RST}\n" "$(date -u '+%Y-%m-%d %H:%M UTC')"
+printf "${C_BOLD}│${C_RST}\n"
+printf "${C_BOLD}│  %-9s %-12s %-10s %-15s %-8s %-22s %-22s %s${C_RST}\n" \
+  "CLI" "Version" "Update" "Account" "Plan" "Day %" "Week %" "Reset in"
+printf "${C_DIM}│  %s${C_RST}\n" "─────────────────────────────────────────────────────────────────────────────────────────────────"
+
+for cli in claude gemini opencode codex; do
+  [ -z "${CLIS[$cli]:-}" ] && continue
+  V="${VER[$cli]:-?}"
+  L="${LATEST[$cli]:-?}"
+  if [ "$V" = "$L" ]; then UPD="${C_GREEN}✓ latest${C_RST}"; else UPD="${C_AMBER}↑ $L${C_RST}"; fi
+
+  D="${DAY_PCT[$cli]:-0}"
+  W="${WEEK_PCT[$cli]:-0}"
+  D_BAR=$(bar "$D" 12)
+  W_BAR=$(bar "$W" 12)
+  RES="${RESET_LABEL[$cli]:-?} (in $(human_time ${RESET_SECS[$cli]:-0}))"
+
+  printf "│  ${C_CYAN}%-9s${C_RST} %-12s %-19s %-15s %-8s %s ${C_DIM}%3d%%${C_RST}  %s ${C_DIM}%3d%%${C_RST}  %s\n" \
+    "$cli" "$V" "$UPD" "${ACCT[$cli]:-n/a}" "${PLAN[$cli]:-?}" \
+    "$D_BAR" "$D" "$W_BAR" "$W" "$RES"
+done
+printf "${C_BOLD}└─${C_RST}\n\n"
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 4 — Interactive percent-threshold input
+# ──────────────────────────────────────────────────────────────────
+echo "${C_BOLD}▸ Set max % of week limit per CLI (Enter = default 75%)${C_RST}"
+echo "  Agents will stop dispatching to a CLI once it crosses this threshold."
+echo ""
+
+declare -A MAX_PCT=()
+for cli in claude gemini opencode codex; do
+  [ -z "${CLIS[$cli]:-}" ] && continue
+  CUR="${WEEK_PCT[$cli]:-0}"
+  printf "  ${C_CYAN}%-9s${C_RST} (current %3d%%) → max %% for this run [75]: " "$cli" "$CUR"
+  read -r INPUT < /dev/tty || INPUT=""
+  INPUT="${INPUT:-75}"
+  if ! [[ "$INPUT" =~ ^[0-9]+$ ]] || [ "$INPUT" -lt 0 ] || [ "$INPUT" -gt 100 ]; then
+    echo "    ${C_RED}invalid (must be 0-100), using 75${C_RST}"
+    INPUT=75
+  fi
+  MAX_PCT[$cli]=$INPUT
+done
+
+echo ""
+echo "${C_BOLD}▸ Stop the entire audit run if any CLI hits its max? [Y/n]:${C_RST} "
+read -r STOP_HARD < /dev/tty || STOP_HARD="Y"
+STOP_HARD="${STOP_HARD:-Y}"
+
+echo ""
+echo "${C_BOLD}▸ Default skill assignment per CLI? [Y/n]:${C_RST} "
+echo "    claude   → d4 d6 d13       (architecture · security · cache)"
+echo "    gemini   → d12 d8 d9        (deps · dead-code · docs)"
+echo "    opencode → d1 d3 d11 d14 d15 (bulk grep)"
+echo "    codex    → d2 d5 d7 d10     (types · perf · a11y · ci)"
+read -r DEFAULT_ASSIGN < /dev/tty || DEFAULT_ASSIGN="Y"
+DEFAULT_ASSIGN="${DEFAULT_ASSIGN:-Y}"
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 5 — Write cqc.config.yaml
+# ──────────────────────────────────────────────────────────────────
+CONFIG_PATH="${PWD}/cqc.config.yaml"
+if [ -f "$CONFIG_PATH" ]; then
+  echo ""
+  echo "${C_AMBER}⚠ cqc.config.yaml already exists. Overwrite? [y/N]:${C_RST} "
+  read -r OVERWRITE < /dev/tty || OVERWRITE="N"
+  OVERWRITE="${OVERWRITE:-N}"
+  [[ "$OVERWRITE" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+fi
+
+cat > "$CONFIG_PATH" <<EOF
+# cqc.config.yaml — generated by cqc-budget @ $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# https://github.com/servas-ai/code-quality-skills-kit
+
+cli_agents:
+  enabled: [$(echo "${!CLIS[@]}" | tr ' ' ',' | sed 's/,/, /g')]
+EOF
+
+if [[ "$DEFAULT_ASSIGN" =~ ^[Yy]$ ]] || [ -z "$DEFAULT_ASSIGN" ]; then
+  cat >> "$CONFIG_PATH" <<EOF
+  skill_assignment:
+    claude:   [d4, d6, d13]
+    gemini:   [d12, d8, d9]
+    opencode: [d1, d3, d11, d14, d15]
+    codex:    [d2, d5, d7, d10]
+EOF
+fi
+
+cat >> "$CONFIG_PATH" <<EOF
+
+# Per-CLI max-% threshold (% of weekly limit)
+budget_thresholds:
+EOF
+for cli in claude gemini opencode codex; do
+  [ -z "${CLIS[$cli]:-}" ] && continue
+  echo "  $cli: ${MAX_PCT[$cli]}%" >> "$CONFIG_PATH"
+done
+
+cat >> "$CONFIG_PATH" <<EOF
+
+# Hard stop if any CLI hits its threshold during the run
+stop_on_threshold: $([[ "$STOP_HARD" =~ ^[Yy]$ ]] && echo true || echo false)
+
+# Reset timestamps (when each CLI's quota window resets)
+# Probed @ $(date -u +%Y-%m-%dT%H:%M:%SZ) — re-run cqc-budget to refresh
+reset_info:
+EOF
+for cli in claude gemini opencode codex; do
+  [ -z "${CLIS[$cli]:-}" ] && continue
+  echo "  $cli:" >> "$CONFIG_PATH"
+  echo "    label: \"${RESET_LABEL[$cli]}\"" >> "$CONFIG_PATH"
+  echo "    in_seconds: ${RESET_SECS[$cli]}" >> "$CONFIG_PATH"
+done
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 6 — Summary
+# ──────────────────────────────────────────────────────────────────
+echo ""
+echo "${C_GREEN}✓ Wrote $CONFIG_PATH${C_RST}"
+echo ""
+echo "${C_BOLD}▸ Summary${C_RST}"
+echo "  Detected: ${#CLIS[@]} CLIs"
+for cli in claude gemini opencode codex; do
+  [ -z "${CLIS[$cli]:-}" ] && continue
+  printf "    ${C_CYAN}%-9s${C_RST} max %s%%  (current %s%%)  resets in %s\n" \
+    "$cli" "${MAX_PCT[$cli]}" "${WEEK_PCT[$cli]:-0}" "$(human_time ${RESET_SECS[$cli]:-0})"
+done
+echo ""
+echo "${C_BOLD}▸ Next:${C_RST}"
+echo "  ${C_CYAN}/code-quality-checker${C_RST}    # in Claude Code — uses this config"
+echo ""

@@ -7,69 +7,63 @@ umask 077
 REPO="${CQSK_REPO:-https://github.com/servas-ai/code-quality-skills-kit}"
 TARGET="${1:-.}"
 
-if [ ! -d "$TARGET" ]; then
-  echo "❌ Target directory does not exist: $TARGET"
-  exit 1
-fi
-
+[ ! -d "$TARGET" ] && { echo "❌ Target not found: $TARGET"; exit 1; }
 cd "$TARGET"
 
-# Sanity: this should be a git repo (the kit assumes it)
-if [ ! -d .git ]; then
-  echo "⚠️  Not a git repository. The kit needs git for run-id + file inventory."
-  echo "    Run 'git init' first, then re-run this installer."
-  exit 1
-fi
+[ ! -d .git ] && { echo "⚠ Not a git repo. Run 'git init' first."; exit 1; }
 
 TMP=$(mktemp -d)
 trap "rm -rf '$TMP'" EXIT
 
-echo "📦 Cloning kit (depth 1) from $REPO …"
+echo "📦 Cloning kit (depth 1)…"
 git clone --depth 1 --quiet "$REPO" "$TMP/kit"
 
-echo "📋 Copying master prompt + derivable cache into $TARGET …"
+echo "📋 Installing into $TARGET …"
 cp "$TMP/kit/code-quality-checker.md" .
 cp -r "$TMP/kit/code-quality-skills" .
 
-# Add audit-reports/ to .gitignore if not already present
+# Install cqc-budget CLI to ~/.local/bin (or /usr/local/bin if writable)
+DEST="$HOME/.local/bin"
+if [ ! -d "$DEST" ]; then
+  mkdir -p "$DEST"
+fi
+cp "$TMP/kit/bin/cqc-budget" "$DEST/cqc-budget"
+chmod +x "$DEST/cqc-budget"
+echo "🔧 Installed cqc-budget → $DEST/cqc-budget"
+case ":$PATH:" in
+  *":$DEST:"*) ;;
+  *) echo "    Add to your shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+esac
+
+# .gitignore
 if ! grep -q "^audit-reports/$" .gitignore 2>/dev/null; then
   echo "" >> .gitignore
-  echo "# code-quality-skills-kit run output" >> .gitignore
+  echo "# code-quality-skills-kit" >> .gitignore
   echo "audit-reports/" >> .gitignore
   echo "✏️  Added 'audit-reports/' to .gitignore"
 fi
 
-# Detect stack and print one-line summary
+# Stack detect
 STACK="unknown"
 [ -f package.json ] && STACK="javascript/typescript"
 [ -f pyproject.toml ] && STACK="python"
 [ -f Cargo.toml ] && STACK="rust"
 [ -f go.mod ] && STACK="go"
-[ -f pom.xml ] && STACK="java/maven"
-[ -f build.gradle ] && [ "$STACK" = "unknown" ] && STACK="java/gradle"
-[ -f Gemfile ] && STACK="ruby"
-[ -f mix.exs ] && STACK="elixir"
 FILES=$(git ls-files | wc -l)
 
-cat <<EOF
+cat <<NEXT
 
 ✅ Installed code-quality-skills-kit
-   Detected stack: $STACK
-   Files in repo:  $FILES
+   Stack: $STACK · Files: $FILES
 
-▶ Next step (in Claude Code):
-   /code-quality-checker            # whole repo
-   /code-quality-checker src/foo    # scope to a path
-   /code-quality-checker --no-tools # skip typecheck/test/build, greps only
+▶ Next:
+   1. cqc-budget                   # interactive: set per-CLI % thresholds
+   2. /code-quality-checker        # in Claude Code: run audit using config
 
-▶ Output goes to:
-   audit-reports/<YYYY-MM-DD>__<short-sha>/
-     REPORT.compact.txt   (AI-feed, ~2.5 KB / 50 findings)
-     REPORT.md            (human)
-     dashboard.html       (browser, no JS)
-     fix-prompts.md       (paste-able)
-     _findings.jsonl      (machine-readable)
+▶ Or skip cqc-budget and run audit with defaults:
+   /code-quality-checker --yes
 
-▶ Customize: edit cqc.config.yaml in repo root (optional — auto-detect works for most repos).
+▶ Output: audit-reports/<date>__<sha>/
+   REPORT.md · REPORT.compact.txt · dashboard.html · fix-prompts.md · _findings.jsonl
 
-EOF
+NEXT
