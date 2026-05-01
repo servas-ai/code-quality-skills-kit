@@ -278,6 +278,38 @@ Templates live ONLY in this file. On every run:
 
 This file = single source of truth. On-disk files = derivable cache.
 
+## 0.6 Universal stack adapters (works on ANY codebase)
+
+The orchestrator auto-detects the stack and swaps the toolchain. **No config needed for 95 % of repos.**
+
+| Detected | Typecheck | Test | Build | Lint | Source globs |
+|----------|-----------|------|-------|------|--------------|
+| `package.json` + `tsconfig.json` (pnpm) | `pnpm typecheck` | `pnpm test --run` | `pnpm build` | `pnpm lint` | `**/*.{ts,tsx,js,jsx}` |
+| `package.json` (npm/yarn) | `npx tsc --noEmit` | `npm test` | `npm run build` | `npx eslint .` | `**/*.{ts,tsx,js,jsx}` |
+| `pyproject.toml` + `mypy.ini` | `mypy .` | `pytest` | `python -m build` | `ruff check .` | `**/*.py` |
+| `Cargo.toml` | `cargo check` | `cargo test` | `cargo build --release` | `cargo clippy` | `**/*.rs` |
+| `go.mod` | `go vet ./...` | `go test ./...` | `go build ./...` | `golangci-lint run` | `**/*.go` |
+| `pom.xml` / `build.gradle` | `mvn compile` / `gradle compileJava` | `mvn test` / `gradle test` | `mvn package` / `gradle build` | `mvn checkstyle:check` | `**/*.java`, `**/*.kt` |
+| `Gemfile` | `bundle exec srb tc` (if Sorbet) | `bundle exec rspec` | — | `bundle exec rubocop` | `**/*.rb` |
+| `mix.exs` | `mix compile --warnings-as-errors` | `mix test` | `mix release` | `mix credo` | `**/*.ex`, `**/*.exs` |
+
+If multiple stacks are detected (polyglot repo), run them all and aggregate. If none detected → emit `_profile.yaml` with `stack.languages: []` and skip Group 2/3, run only Group 1 + 5 (greps work on any language).
+
+**One-prompt universal install** for any repo:
+
+```bash
+# Drop the kit + run an audit, on any codebase, in one command:
+curl -sSL https://raw.githubusercontent.com/servas-ai/code-quality-skills-kit/main/install.sh | sh
+# OR manually:
+git clone --depth 1 https://github.com/servas-ai/code-quality-skills-kit /tmp/cqsk
+cp /tmp/cqsk/code-quality-checker.md ./
+cp -r /tmp/cqsk/code-quality-skills ./
+echo "audit-reports/" >> .gitignore
+# Then in Claude Code:  /code-quality-checker
+```
+
+See `install.sh` for the one-line bootstrap.
+
 ---
 
 # Phase 1 — Seed `_run.json`

@@ -1,0 +1,42 @@
+# cqc.config.yaml — optional override file for code-quality-skills-kit
+#
+# If this file exists in the repo root, it OVERRIDES auto-detected profile.
+# Otherwise the orchestrator auto-detects the stack from package.json /
+# pyproject.toml / Cargo.toml / etc. (see § 0.6 Universal stack adapters).
+#
+# Drop into your repo root and edit. Most repos don't need this — auto-detect
+# works for 95 % of cases.
+
+stack:
+  languages: [ts, tsx]            # ts, tsx, js, py, rs, go, java, kt, rb, ex
+  frameworks: [next, react]       # next, react, vue, svelte, fastapi, express, django
+  test_runners: [vitest]          # vitest, jest, pytest, cargo, go, rspec, mix
+  package_manager: pnpm           # pnpm, npm, yarn, pip, poetry, cargo, go, mvn
+  monorepo: false
+
+# Project-specific invariants. Each is verified by a shell command.
+# A finding that bypasses an invariant is auto-CRITICAL.
+invariants: []
+  # Example:
+  # - name: All API calls go through src/lib/api.ts
+  #   verify: rg "fetch\\(" src/ | grep -v "src/lib/api.ts"
+
+# Language policy. Affects D11 i18n behaviour:
+#   ui_strings: extracted    → flag any hardcoded UI strings
+#   ui_strings: en           → preserve English strings (informational only)
+#   ui_strings: de           → preserve German strings (informational only)
+language_policy:
+  ui_strings: en
+  code_identifiers: en
+
+# Directories that should NOT exist in this codebase.
+# Findings that recommend building anything here are auto-dismissed.
+scope_blocklist: []
+  # Example: [billing, admin, tickets]
+
+# Override the auto-detected toolchain. Leave empty to use auto-detect.
+scripts: {}
+  # typecheck: pnpm typecheck
+  # test: pnpm test --run
+  # build: pnpm build
+  # lint: pnpm lint
