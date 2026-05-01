@@ -91,20 +91,54 @@ def run_json(cmd, timeout=30):
         return None, str(e)
 
 
+def pull_codex_ratelimits():
+    """REAL 5h+weekly % from latest ~/.codex/sessions/**/token_count event."""
+    import glob
+    files = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/**/*.jsonl"), recursive=True),
+                   key=lambda p: os.path.getmtime(p), reverse=True)
+    for fp in files[:20]:
+        latest = None
+        try:
+            with open(fp) as f:
+                for line in f:
+                    try: e = json.loads(line)
+                    except Exception: continue
+                    if e.get("type") == "event_msg" and (e.get("payload") or {}).get("type") == "token_count":
+                        rl = (e["payload"].get("rate_limits") or {})
+                        if rl.get("primary") and rl["primary"].get("used_percent") is not None:
+                            latest = e
+            if latest:
+                rl = latest["payload"]["rate_limits"]
+                p, s = rl.get("primary") or {}, rl.get("secondary") or {}
+                return {
+                    "primary":  {"used_percent": p.get("used_percent"),
+                                 "window_minutes": p.get("window_minutes"),
+                                 "resets_at": p.get("resets_at")},
+                    "secondary": {"used_percent": s.get("used_percent"),
+                                  "window_minutes": s.get("window_minutes"),
+                                  "resets_at": s.get("resets_at")} if s.get("used_percent") is not None else None,
+                    "source_ts": latest.get("timestamp"),
+                    "source_file": fp,
+                }
+        except Exception: pass
+    return None
+
+
 def pull_codex():
-    """bun x @ccusage/codex@latest daily --json"""
+    """ccusage tokens + JSONL ratelimits (REAL %)"""
     data, err = run_json(["bun", "x", "@ccusage/codex@latest", "daily", "--json"], timeout=60)
     if err: return None, err
     daily = data.get("daily", [])
-    today = today_key()
     today_row = _today_row(daily)
     totals = data.get("totals", {})
+    rl = pull_codex_ratelimits()
     return {
         "today_usd":     round(today_row.get("costUSD", 0.0), 4),
         "today_tokens":  today_row.get("totalTokens", 0),
         "model_used":    next(iter(today_row.get("models", {})), None),
         "all_time_usd":  round(totals.get("costUSD", 0.0), 2),
         "all_time_tokens": totals.get("totalTokens", 0),
+        "ratelimits":    rl,  # REAL 5h+weekly from sessions
         "raw": {"date": today_row.get("date"), "models": list((today_row.get("models") or {}).keys())},
     }, None
 
@@ -125,26 +159,91 @@ def pull_opencode():
     }, None
 
 
+def pull_claude_oauth():
+    """REAL email + 5h/weekly utilization from api.anthropic.com (cached 5min on disk)."""
+    creds = os.path.expanduser("~/.claude/.credentials.json")
+    if not os.path.isfile(creds):
+        return None, "credentials.json missing — run `claude /login`"
+    try:
+        with open(creds) as f: c = json.load(f)
+        oa = c.get("claudeAiOauth", {})
+        tok = oa.get("accessToken")
+        if not tok: return None, "no access token"
+        # Cache file
+        cache = "/tmp/cqc-claude-oauth-cache.json"
+        if os.path.isfile(cache) and (time.time() - os.path.getmtime(cache)) < 300:
+            try:
+                with open(cache) as f: return json.load(f), None
+            except Exception: pass
+        # Live profile + usage
+        import urllib.request, urllib.error
+        out = {"plan": oa.get("subscriptionType"), "rate_limit_tier": oa.get("rateLimitTier"),
+               "expires_at_ms": oa.get("expiresAt")}
+        for endpoint, key in [("profile", "profile"), ("usage", "usage")]:
+            try:
+                req = urllib.request.Request(
+                    f"https://api.anthropic.com/api/oauth/{endpoint}",
+                    headers={"Authorization": f"Bearer {tok}",
+                             "anthropic-beta": "oauth-2025-04-20",
+                             "User-Agent": "cqc-ui/3.18"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    out[key] = json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                out[key + "_error"] = f"{e.code} {e.reason}"
+                if e.code == 401: out["needs_relogin"] = True
+            except Exception as e:
+                out[key + "_error"] = str(e)
+        # Persist cache
+        try:
+            with open(cache, "w") as f: json.dump(out, f)
+        except Exception: pass
+        return out, None
+    except Exception as e:
+        return None, str(e)
+
+
 def pull_claude():
-    """npx ccusage@latest daily --json"""
-    data, err = run_json(["bun", "x", "ccusage@latest", "daily", "--json"], timeout=60)
-    if err: return None, err
-    daily = data.get("daily", [])
-    today_row = _today_row(daily)
-    totals = data.get("totals", {})
-    return {
+    """OAuth profile/usage + ccusage tokens"""
+    oauth, err = pull_claude_oauth()
+    data, _ = run_json(["bun", "x", "ccusage@latest", "daily", "--json"], timeout=60)
+    today_row = _today_row((data or {}).get("daily", []))
+    totals = (data or {}).get("totals", {})
+    out = {
         "today_usd":     round(today_row.get("costUSD", 0.0), 4),
         "today_tokens":  today_row.get("totalTokens", 0),
         "model_used":    next(iter(today_row.get("models", {})), None),
         "all_time_usd":  round(totals.get("costUSD", 0.0), 2),
-    }, None
+    }
+    if oauth:
+        prof = (oauth.get("profile") or {}).get("account") or {}
+        org  = (oauth.get("profile") or {}).get("organization") or {}
+        usage= oauth.get("usage") or {}
+        out["email"]       = prof.get("email")
+        out["full_name"]   = prof.get("full_name")
+        out["plan"]        = "claude_max" if prof.get("has_claude_max") else ("claude_pro" if prof.get("has_claude_pro") else oauth.get("plan"))
+        out["org_name"]    = org.get("name")
+        out["rate_limit_tier"] = org.get("rate_limit_tier")
+        out["five_hour"]   = usage.get("five_hour")
+        out["seven_day"]   = usage.get("seven_day")
+        out["seven_day_sonnet"] = usage.get("seven_day_sonnet")
+        out["seven_day_opus"]   = usage.get("seven_day_opus")
+        out["needs_relogin"] = oauth.get("needs_relogin", False)
+        out["oauth_error"]   = oauth.get("profile_error") or oauth.get("usage_error")
+    elif err:
+        out["oauth_error"] = err
+        out["needs_relogin"] = "missing" in (err or "")
+    return out, None
 
 
 def pull_gemini():
-    """No JSON CLI — count session files in ~/.gemini/tmp/_/chats/ as lower bound."""
+    """No quota API exists (verified). Count today's session files as ROUGH lower-bound only.
+
+    The session-file count is misleading — multi-turn sessions count as 1, and old chats persist.
+    Mark this clearly so the dashboard shows "no quota API" instead of fake %.
+    """
     chats_dir = os.path.expanduser("~/.gemini/tmp")
     today = today_key()
-    calls_today = 0
+    sessions_today = 0
     last_model = None
     if os.path.isdir(chats_dir):
         for root, _, files in os.walk(chats_dir):
@@ -154,39 +253,72 @@ def pull_gemini():
                 try:
                     mtime = datetime.fromtimestamp(os.path.getmtime(fp), tz=timezone.utc)
                     if mtime.strftime("%Y-%m-%d") == today:
-                        calls_today += 1
+                        sessions_today += 1
                         try:
-                            with open(fp) as f:
-                                d = json.load(f)
+                            with open(fp) as f: d = json.load(f)
                             m = d.get("model") or (d.get("config", {}).get("model") if isinstance(d.get("config"), dict) else None)
                             if m: last_model = m
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception: pass
+                except Exception: pass
+    # Check oauth_creds expiry for auth status
+    oc = os.path.expanduser("~/.gemini/oauth_creds.json")
+    needs_relogin = False
+    auth_error = None
+    if not os.path.isfile(oc):
+        needs_relogin = True
+        auth_error = "oauth_creds.json missing"
+    else:
+        try:
+            with open(oc) as f: o = json.load(f)
+            exp = o.get("expiry_date") or o.get("expiry")
+            if exp and exp > 1e10: exp = exp / 1000
+            if exp and not o.get("refresh_token"):
+                if exp < time.time():
+                    needs_relogin = True
+                    auth_error = "access token expired AND no refresh token"
+        except Exception as e:
+            auth_error = str(e)
     return {
         "today_usd":     0.0,
         "today_tokens":  0,
-        "calls_today":   calls_today,
+        "sessions_today": sessions_today,
+        "calls_today":   None,   # don't fake this
         "model_used":    last_model,
-        "raw": {"source": "session-file count (lower bound)"},
+        "needs_relogin": needs_relogin,
+        "oauth_error":   auth_error,
+        "no_quota_api":  True,
+        "raw": {"source": "session file count (ROUGH lower bound, NOT real quota)",
+                "note": "Google has no quota API for free-tier OAuth users — see cqc docs."},
     }, None
 
 
 def compute_used_pct(cli, data):
-    """Estimate used % from quota anchors."""
+    """Real % from API where available; quota-anchor estimate elsewhere."""
     if not data: return 0
-    a = QUOTA_ANCHORS.get(cli, {})
-    if cli in ("codex", "claude"):
-        full = a.get("daily_usd_full", 1.0) or 1.0
-        return min(100, round(100 * (data.get("today_usd", 0.0) / full), 1))
+    if cli == "codex":
+        rl = data.get("ratelimits") or {}
+        p = (rl.get("primary") or {}).get("used_percent")
+        s = (rl.get("secondary") or {}).get("used_percent") if rl.get("secondary") else None
+        if p is not None or s is not None:
+            return max(p or 0, s or 0)
+    if cli == "claude":
+        # Real OAuth utilization
+        fh = (data.get("five_hour") or {}).get("utilization")
+        sd = (data.get("seven_day") or {}).get("utilization")
+        if fh is not None or sd is not None:
+            return max(fh or 0, sd or 0)
     if cli == "gemini":
-        full = a.get("daily_calls_full", 1) or 1
-        return min(100, round(100 * (data.get("calls_today", 0) / full), 1))
+        # NO quota API — return 0, dashboard will show "no quota API" instead of bar
+        return 0
     if cli == "opencode":
+        # GLM is "unmetered" — show token count divided by anchor
+        a = QUOTA_ANCHORS.get(cli, {})
         full = a.get("daily_tokens_full", 1) or 1
         return min(100, round(100 * (data.get("today_tokens", 0) / full), 1))
-    return 0
+    # Fallback
+    a = QUOTA_ANCHORS.get(cli, {})
+    full = a.get("daily_usd_full", 1.0) or 1.0
+    return min(100, round(100 * (data.get("today_usd", 0.0) / full), 1))
 
 
 def main():
