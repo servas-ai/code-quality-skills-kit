@@ -40,3 +40,23 @@ scripts: {}
   # test: pnpm test --run
   # build: pnpm build
   # lint: pnpm lint
+
+# Multi-CLI parallel dispatch (Phase 0.8).
+# auto-detect: probes for `claude`, `gemini`, `opencode`, `codex` and uses what's installed.
+# Specify a list to restrict, or [] to disable cross-CLI fan-out.
+cli_agents:
+  enabled: auto    # auto | [claude, gemini, opencode, codex] | []
+  # Optional: pin specific skills to specific CLIs.
+  # skill_assignment:
+  #   claude:   [d4, d6, d13]      # architecture, security
+  #   gemini:   [d12, d8, d9]      # large-context, deps
+  #   opencode: [d1, d3, d11]      # bulk grep
+  #   codex:    [d2, d5, d7, d10]  # types, perf
+
+# Interactive onboarding answers (auto-saved on first run).
+# Edit to change defaults; delete to re-prompt next run.
+onboarding:
+  run_real_tools: true            # Q1: pnpm typecheck/test/build (slower, more thorough)
+  scope: whole_repo               # Q2: whole_repo | active_30d | critical_paths
+  report_threshold: all           # Q3: all | medium_and_above | high_and_critical
+  multi_cli: auto                 # Q4: auto | claude_only | custom

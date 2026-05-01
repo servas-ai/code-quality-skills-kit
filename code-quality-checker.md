@@ -210,6 +210,126 @@ Same atomic-RW protocol.
 
 ---
 
+# Phase 0.0 — Interactive Onboarding (4 questions, smart defaults)
+
+When the user invokes `/code-quality-checker` for the **first time** in a repo (no `cqc.config.yaml` and no prior `audit-reports/` history), ask these 4 questions via `AskUserQuestion`. Otherwise skip — re-use prior answers from `cqc.config.yaml`.
+
+**Skip the entire onboarding if** `--yes` flag is passed OR `cqc.config.yaml` already exists OR `audit-reports/` has at least one prior run.
+
+### Q1 — Run real tools (typecheck/test/build)?
+- **Yes (default)** — runs `pnpm typecheck` / `pnpm test` / `pnpm build` (≈8 min on medium repo). Catches more issues, slower.
+- **No (greps only)** — only static analysis (≈2 min). Faster, misses tsc errors.
+
+→ Sets `--no-tools` flag if "No".
+
+### Q2 — Audit scope?
+- **Whole repo (default)** — every source file.
+- **Active code only** — only files modified in last 30 days (uses git log).
+- **Critical paths** — only `src/lib/*`, `src/features/*/repository.ts`, auth/payment/api routes.
+
+→ Sets internal `scope_filter` in `_profile.yaml`.
+
+### Q3 — Severity threshold for the report?
+- **All findings (default)** — include LOW (nice-to-have).
+- **Medium and above** — drop LOW noise.
+- **High and critical only** — only actionable now.
+
+→ Sets `report_threshold` in `_profile.yaml`. `_findings.jsonl` always contains all; threshold filters `REPORT.md` only.
+
+### Q4 — Multi-CLI parallel agents available?
+- **Auto-detect (default)** — orchestrator probes for `claude`, `gemini`, `opencode`, `codex` and uses whatever's installed.
+- **Claude Code only** — single CLI, sequential dispatch (still parallel sub-agents within Claude Code).
+- **Pick specific CLIs** — user chooses which to enable.
+
+→ Sets `cli_agents.enabled[]` in `_profile.yaml`. See § Phase 0.8.
+
+### Persistence
+
+Answers are written to `cqc.config.yaml` (created if missing). Future runs read from this file and skip the questions. Edit the file to change defaults.
+
+**Default answers (if onboarding is skipped):** Q1=Yes · Q2=Whole repo · Q3=All findings · Q4=Auto-detect.
+
+---
+
+# Phase 0.8 — Multi-CLI Agent Detection (parallel cross-CLI fan-out)
+
+The orchestrator can dispatch sub-agents to **multiple AI CLIs in parallel**. Each detected CLI gets a slice of skills. Aggregation happens via the same `_findings.jsonl` (all CLIs append to it).
+
+## Detection
+
+```bash
+declare -A CLIS=()
+command -v claude     >/dev/null && CLIS[claude]="claude --print"
+command -v gemini     >/dev/null && CLIS[gemini]="gemini -p"
+command -v opencode   >/dev/null && CLIS[opencode]="opencode run"
+command -v codex      >/dev/null && CLIS[codex]="codex exec"
+
+echo "Detected CLIs: ${!CLIS[@]}"
+```
+
+If `cli_agents.enabled` in `cqc.config.yaml` lists specific CLIs, use only those. Otherwise use all detected.
+
+## Dispatch matrix
+
+If multiple CLIs are available, distribute skills by CLI strength:
+
+| CLI | Best at | Default skills |
+|-----|---------|----------------|
+| **claude** (Anthropic) | Architecture, security reasoning, code review | d4, d6, d13 |
+| **gemini** (Google) | Large-context whole-repo scans, dependency analysis | d12, d8, d9 |
+| **opencode** (open-source agent) | Bulk grep-based audits, fast iteration | d1, d3, d11, d14, d15 |
+| **codex** (OpenAI) | Type analysis, test generation, performance | d2, d5, d7, d10 |
+
+If only ONE CLI is available, it gets all skills (current behaviour). If TWO, split evenly. Etc.
+
+## Spawn protocol per CLI
+
+Each CLI sub-agent gets the **same prompt structure** but uses its native invocation:
+
+```bash
+# Claude Code (the host)
+# → spawns native sub-agents via Task tool internally
+
+# Gemini CLI
+gemini -p "$(cat <<EOF
+You are sub-skill d12 in a multi-agent code-quality audit.
+Read: /path/to/repo/code-quality-checker.md § Shared contract + § Skill kit:d12
+Read: /path/to/repo/audit-reports/<RUN_ID>/_run.json
+Append findings to: /path/to/repo/audit-reports/<RUN_ID>/_findings.jsonl
+Update agents.d12 to "done" in _run.json when finished.
+Cwd: /path/to/repo
+EOF
+)" &
+
+# OpenCode
+opencode run "Audit dim d11 against artifacts/creator-chat/src/, append to _findings.jsonl, follow shared contract" &
+
+# Codex
+codex exec "Run d2 typecheck audit, follow code-quality-checker.md contract" &
+
+wait  # for all parallel CLIs
+```
+
+**Why this works:** the contract is just files (`_run.json`, `_findings.jsonl`, master prompt). Any CLI that can read files + run shell + append to JSONL can participate.
+
+## Conflict resolution
+
+- IDs use CLI prefix: `claude-C1`, `gemini-M3`, `opencode-L4`, `codex-H7`. No collisions.
+- `_run.json:agents.<skill>.cli` records which CLI did each skill.
+- If two CLIs claim the same skill simultaneously, the lock file `_run.json.lock` (flock) gates writes; second writer reads first's claim and picks the next free skill.
+
+## Aggregation
+
+The host Claude Code orchestrator reads `_findings.jsonl` regardless of source. All findings have the same schema. Compact citations work across CLIs because they cite real `file:line` from disk.
+
+## Fallback
+
+If no other CLI is available (only `claude`), behave exactly as v3.3 — Claude Code spawns its own sub-agents via the Task tool.
+
+If a CLI fails or times out (>5 min), mark its claim `failed` in `_run.json`, redistribute its skills to remaining CLIs.
+
+---
+
 # Phase 0 — Boot (≤30 s)
 
 ## 0.1 Parse `$ARGUMENTS`
@@ -226,6 +346,8 @@ Same atomic-RW protocol.
 | `--no-tools` | skip typecheck/test/build (greps only) |
 | `--dry-run` | print plan, write nothing |
 | `--with-dashboard=full` | rich HTML dashboard |
+| `--yes` | skip interactive onboarding (use all defaults) |
+| `--clis=claude,gemini` | restrict to specific CLIs (default: auto-detect all) |
 
 ## 0.2 Run identity
 

@@ -75,3 +75,33 @@ The orchestrator now does codebase reconnaissance and writes a tailored plan BEF
 - 6 output templates
 - Self-bootstrapping master prompt
 - Dashboard.html + REPORT.md + fix-prompts.md
+
+## v3.4 — Interactive onboarding + Multi-CLI dispatch
+
+### New phases
+
+- **Phase 0.0 — Interactive Onboarding (4 questions)** asked on first run only:
+  1. Run real tools (typecheck/test/build)? Yes/No
+  2. Audit scope: whole repo / active 30d / critical paths?
+  3. Severity threshold: all / medium+ / high+critical?
+  4. Multi-CLI parallel: auto-detect / claude only / custom?
+  Answers saved to `cqc.config.yaml`. Skip with `--yes`. Skipped on subsequent runs.
+
+- **Phase 0.8 — Multi-CLI Agent Detection** probes `claude`, `gemini`, `opencode`, `codex`
+  and dispatches skills across all detected CLIs in parallel. Each CLI gets skills tuned to
+  its strengths:
+  - **claude** (architecture/security/review): d4, d6, d13
+  - **gemini** (large-context/deps): d12, d8, d9
+  - **opencode** (bulk greps): d1, d3, d11, d14, d15
+  - **codex** (types/perf/tests): d2, d5, d7, d10
+  Findings IDs prefixed by CLI name (`claude-C1`, `gemini-M3`) — zero collision risk.
+  Falls back gracefully to single-CLI mode when only one is installed.
+
+### New flags
+
+- `--yes` — skip interactive onboarding
+- `--clis=claude,gemini` — restrict to specific CLIs
+
+### Config additions
+
+`cqc.config.example.yaml` now includes `cli_agents` and `onboarding` sections.
