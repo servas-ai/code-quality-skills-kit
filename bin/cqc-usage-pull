@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""cqc-usage-pull — pull real usage data from ccusage variants.
+
+Writes ~/.cqc/usage.json. Designed to run on-demand (UI Refresh button) or cron.
+
+Sources:
+- @ccusage/codex   → codex tokens + cost (real numbers from JSONL)
+- @ccusage/opencode → opencode tokens
+- ccusage          → claude tokens (excluded from blocks but recorded)
+- gemini           → no tool yet; estimate from session-file count
+
+Output: ~/.cqc/usage.json with shape:
+{
+  "version": 2,
+  "updated_at": "2026-...",
+  "by_cli": {
+    "codex":    {"today_usd": 2.22, "today_tokens": 1591364, "calls_today": 7,
+                 "model_used": "gpt-5.5", "used_pct": 12.3, "raw": {...}},
+    "gemini":   {...},
+    "opencode": {...},
+    "claude":   {...}
+  },
+  "by_day": {"2026-05-02": {codex:..., ...}},
+  "errors": []
+}
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+USAGE_FILE = os.path.expanduser("~/.cqc/usage.json")
+BUDGET_FILE = os.path.expanduser("~/.cqc/budget.json")
+
+# Per-CLI quota anchors (rough — refine when caut is added)
+QUOTA_ANCHORS = {
+    "codex":    {"daily_usd_full": 18.0,  "weekly_usd_full": 100.0},   # ChatGPT plan estimate
+    "gemini":   {"daily_calls_full": 100, "weekly_calls_full": 500},   # Free tier estimate
+    "opencode": {"daily_tokens_full": 10_000_000},                      # GLM-5.1 unmetered
+    "claude":   {"daily_usd_full": 50.0},
+}
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_key():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _today_row(daily):
+    """Find today's row across multiple ccusage date formats."""
+    if not daily: return {}
+    today = datetime.now(timezone.utc)
+    candidates = [
+        today.strftime("%b %d, %Y"),       # "May 02, 2026"
+        today.strftime("%b %-d, %Y"),      # "May 2, 2026"
+        today.strftime("%Y-%m-%d"),        # "2026-05-02"
+        today.strftime("%Y%m%d"),          # "20260502"
+    ]
+    for row in daily:
+        ds = str(row.get("date", ""))
+        if any(c == ds or c in ds for c in candidates):
+            return row
+    # Fallback: assume daily is sorted, take last
+    return daily[-1] if daily else {}
+
+
+def run_json(cmd, timeout=30):
+    """Run a command, strip stderr/warnings, parse JSON from first { or [."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = r.stdout
+        if not out.strip():
+            return None, f"empty output from {' '.join(cmd[:2])}"
+        # Strip leading non-JSON lines (npm warnings etc.)
+        idx = out.find("{")
+        idx2 = out.find("[")
+        if idx2 >= 0 and (idx < 0 or idx2 < idx):
+            idx = idx2
+        if idx < 0:
+            return None, "no JSON found"
+        return json.loads(out[idx:]), None
+    except subprocess.TimeoutExpired:
+        return None, f"timeout {' '.join(cmd[:2])}"
+    except Exception as e:
+        return None, str(e)
+
+
+def pull_codex():
+    """bun x @ccusage/codex@latest daily --json"""
+    data, err = run_json(["bun", "x", "@ccusage/codex@latest", "daily", "--json"], timeout=60)
+    if err: return None, err
+    daily = data.get("daily", [])
+    today = today_key()
+    today_row = _today_row(daily)
+    totals = data.get("totals", {})
+    return {
+        "today_usd":     round(today_row.get("costUSD", 0.0), 4),
+        "today_tokens":  today_row.get("totalTokens", 0),
+        "model_used":    next(iter(today_row.get("models", {})), None),
+        "all_time_usd":  round(totals.get("costUSD", 0.0), 2),
+        "all_time_tokens": totals.get("totalTokens", 0),
+        "raw": {"date": today_row.get("date"), "models": list((today_row.get("models") or {}).keys())},
+    }, None
+
+
+def pull_opencode():
+    """bun x @ccusage/opencode@latest daily --json"""
+    data, err = run_json(["bun", "x", "@ccusage/opencode@latest", "daily", "--json"], timeout=60)
+    if err: return None, err
+    daily = data.get("daily", [])
+    today_row = _today_row(daily)
+    totals = data.get("totals", {})
+    return {
+        "today_usd":     round(today_row.get("costUSD", 0.0), 4),
+        "today_tokens":  today_row.get("totalTokens", 0),
+        "model_used":    next(iter(today_row.get("models", {})), None),
+        "all_time_tokens": totals.get("totalTokens", 0),
+        "raw": {"date": today_row.get("date"), "models": list((today_row.get("models") or {}).keys())},
+    }, None
+
+
+def pull_claude():
+    """npx ccusage@latest daily --json"""
+    data, err = run_json(["bun", "x", "ccusage@latest", "daily", "--json"], timeout=60)
+    if err: return None, err
+    daily = data.get("daily", [])
+    today_row = _today_row(daily)
+    totals = data.get("totals", {})
+    return {
+        "today_usd":     round(today_row.get("costUSD", 0.0), 4),
+        "today_tokens":  today_row.get("totalTokens", 0),
+        "model_used":    next(iter(today_row.get("models", {})), None),
+        "all_time_usd":  round(totals.get("costUSD", 0.0), 2),
+    }, None
+
+
+def pull_gemini():
+    """No JSON CLI — count session files in ~/.gemini/tmp/_/chats/ as lower bound."""
+    chats_dir = os.path.expanduser("~/.gemini/tmp")
+    today = today_key()
+    calls_today = 0
+    last_model = None
+    if os.path.isdir(chats_dir):
+        for root, _, files in os.walk(chats_dir):
+            for fn in files:
+                if not fn.endswith(".json"): continue
+                fp = os.path.join(root, fn)
+                try:
+                    mtime = datetime.fromtimestamp(os.path.getmtime(fp), tz=timezone.utc)
+                    if mtime.strftime("%Y-%m-%d") == today:
+                        calls_today += 1
+                        try:
+                            with open(fp) as f:
+                                d = json.load(f)
+                            m = d.get("model") or (d.get("config", {}).get("model") if isinstance(d.get("config"), dict) else None)
+                            if m: last_model = m
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+    return {
+        "today_usd":     0.0,
+        "today_tokens":  0,
+        "calls_today":   calls_today,
+        "model_used":    last_model,
+        "raw": {"source": "session-file count (lower bound)"},
+    }, None
+
+
+def compute_used_pct(cli, data):
+    """Estimate used % from quota anchors."""
+    if not data: return 0
+    a = QUOTA_ANCHORS.get(cli, {})
+    if cli in ("codex", "claude"):
+        full = a.get("daily_usd_full", 1.0) or 1.0
+        return min(100, round(100 * (data.get("today_usd", 0.0) / full), 1))
+    if cli == "gemini":
+        full = a.get("daily_calls_full", 1) or 1
+        return min(100, round(100 * (data.get("calls_today", 0) / full), 1))
+    if cli == "opencode":
+        full = a.get("daily_tokens_full", 1) or 1
+        return min(100, round(100 * (data.get("today_tokens", 0) / full), 1))
+    return 0
+
+
+def main():
+    os.makedirs(os.path.dirname(USAGE_FILE), exist_ok=True)
+
+    # Load existing
+    try:
+        with open(USAGE_FILE) as f: prev = json.load(f)
+    except Exception:
+        prev = {"version": 2, "by_cli": {}, "by_day": {}, "errors": []}
+
+    out = {"version": 2, "updated_at": now_iso(), "by_cli": {}, "by_day": prev.get("by_day", {}), "errors": []}
+
+    pullers = {"codex": pull_codex, "opencode": pull_opencode, "claude": pull_claude, "gemini": pull_gemini}
+    for cli, fn in pullers.items():
+        t0 = time.time()
+        data, err = fn()
+        elapsed = round(time.time() - t0, 2)
+        if err or not data:
+            out["errors"].append({"cli": cli, "error": err or "no data", "elapsed": elapsed})
+            # Keep previous
+            out["by_cli"][cli] = prev.get("by_cli", {}).get(cli, {})
+            continue
+        data["used_pct"] = compute_used_pct(cli, data)
+        data["pulled_at"] = now_iso()
+        data["pull_elapsed_s"] = elapsed
+        out["by_cli"][cli] = data
+
+    # Append today to history
+    today = today_key()
+    out["by_day"][today] = {c: out["by_cli"][c] for c in out["by_cli"]}
+    # Trim history to last 30 days
+    keys = sorted(out["by_day"].keys())
+    if len(keys) > 30:
+        for k in keys[:-30]: out["by_day"].pop(k, None)
+
+    tmp = USAGE_FILE + ".tmp"
+    with open(tmp, "w") as f: json.dump(out, f, indent=2)
+    os.replace(tmp, USAGE_FILE)
+
+    print(json.dumps({
+        "ok": True,
+        "updated_at": out["updated_at"],
+        "by_cli": {c: {"used_pct": d.get("used_pct"), "today_usd": d.get("today_usd"), "model": d.get("model_used")}
+                   for c, d in out["by_cli"].items()},
+        "errors": out["errors"],
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()

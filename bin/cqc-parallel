@@ -180,15 +180,21 @@ spawn_cli() {
   ( timeout --kill-after=10 "$TIMEOUT" "${cmd[@]}" > "$log" 2>&1
     EXIT=$?
 
-    # Gemini Flash fallback: retry on quota-exhaust (RESOURCE_EXHAUSTED, 429, "quota")
+    # Gemini multi-model chain: try primary → 3.1-pro → 2.5-flash on quota errors
     if [ "$cli" = "gemini" ] && [ $EXIT -ne 0 ] && [ $EXIT -ne 124 ]; then
-      if grep -qiE "RESOURCE_EXHAUSTED|429|quota|exceeded|rate.?limit" "$log" 2>/dev/null; then
-        echo "" >> "$log"
-        echo "── [auto-fallback] retry with $GEMINI_FALLBACK (unmetered) ──" >> "$log"
-        timeout --kill-after=10 "$TIMEOUT" gemini --yolo --approval-mode yolo \
-          -m "${GEMINI_FALLBACK:-gemini-2.5-flash}" -p "$prompt" >> "$log" 2>&1
-        EXIT=$?
-      fi
+      CHAIN=$(jq -r '.model_chains.gemini // [] | .[]' "$BUDGET_FILE" 2>/dev/null | tail -n +2)
+      for next_model in $CHAIN; do
+        if grep -qiE "RESOURCE_EXHAUSTED|429|quota|exceeded|rate.?limit" "$log" 2>/dev/null; then
+          echo "" >> "$log"
+          echo "── [auto-fallback] retry with $next_model ──" >> "$log"
+          timeout --kill-after=10 "$TIMEOUT" gemini --yolo --approval-mode yolo \
+            -m "$next_model" -p "$prompt" >> "$log" 2>&1
+          EXIT=$?
+          [ $EXIT -eq 0 ] && break
+        else
+          break
+        fi
+      done
     fi
 
     if [ $EXIT -eq 0 ]; then
