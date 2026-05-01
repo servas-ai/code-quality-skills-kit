@@ -21,13 +21,14 @@ echo "📋 Installing kit into $TARGET …"
 cp "$TMP/kit/code-quality-checker.md" .
 cp -r "$TMP/kit/code-quality-skills" .
 
-# Install cqc + cqc-budget binaries
+# Install cqc + cqc-budget + cqc-ui binaries
 DEST="$HOME/.local/bin"
 mkdir -p "$DEST"
 cp "$TMP/kit/bin/cqc" "$DEST/cqc"
 cp "$TMP/kit/bin/cqc-budget" "$DEST/cqc-budget"
-chmod +x "$DEST/cqc" "$DEST/cqc-budget"
-echo "🔧 Installed: cqc + cqc-budget → $DEST/"
+cp "$TMP/kit/bin/cqc-ui" "$DEST/cqc-ui"
+chmod +x "$DEST/cqc" "$DEST/cqc-budget" "$DEST/cqc-ui"
+echo "🔧 Installed: cqc + cqc-budget + cqc-ui → $DEST/"
 
 # Register /cqc slash command for Claude Code
 if [ -d "$HOME/.claude" ]; then

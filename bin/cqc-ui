@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+# cqc-ui — local web UI to monitor cqc runs
+# Spawns a tiny Python HTTP server on http://localhost:7331
+# Auto-refreshes every 3s. Reads audit-reports/ directly. No deps.
+#
+# Usage:  cqc-ui              # serve current dir's audit-reports/
+#         cqc-ui /path/repo   # serve a specific repo's audit-reports/
+#         cqc-ui --port 8080  # custom port
+
+set -euo pipefail
+umask 077
+
+PORT="${CQC_UI_PORT:-7331}"
+TARGET="${1:-.}"
+
+while [ "${1:-}" != "" ]; do
+  case "$1" in
+    --port)  PORT="$2"; shift ;;
+    --port=*) PORT="${1#--port=}" ;;
+    -h|--help)
+      cat <<HELP
+cqc-ui — local web UI for cqc
+
+Usage:
+  cqc-ui                # serve cwd's audit-reports/
+  cqc-ui /path/to/repo  # serve a specific repo
+  cqc-ui --port 8080    # custom port (default 7331)
+HELP
+      exit 0 ;;
+    *) [ -d "$1" ] && TARGET="$1" ;;
+  esac
+  shift
+done
+
+cd "$TARGET"
+ABS=$(pwd -P)
+
+if ! command -v python3 >/dev/null; then
+  echo "❌ python3 required (for the embedded server)" >&2; exit 1
+fi
+
+# Generate the index.html dynamically (single file, all-in-one)
+TMPDIR=$(mktemp -d) && trap "rm -rf $TMPDIR" EXIT
+HTML="$TMPDIR/index.html"
+
+cat > "$HTML" <<'HTMLEOF'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cqc · runs monitor</title>
+<style>
+:root{--bg:#0a0d12;--card:#14181f;--bd:#2a2f3b;--fg:#e6e8eb;--muted:#8b93a1;--cy:#00d9ff;--gn:#4ade80;--am:#ffc857;--rd:#ff5566}
+*,*::before,*::after{box-sizing:border-box}
+body{font-family:'JetBrains Mono','SF Mono',Consolas,monospace;background:var(--bg);color:var(--fg);margin:0;padding:24px;line-height:1.5}
+h1{font-size:20px;margin:0 0 8px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:12px;margin-bottom:24px}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:24px}
+.kpi{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px}
+.kpi .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+.kpi .v{font-size:24px;font-weight:700;margin-top:4px}
+.kpi.gn .v{color:var(--gn)} .kpi.am .v{color:var(--am)} .kpi.rd .v{color:var(--rd)} .kpi.cy .v{color:var(--cy)}
+h2{font-size:14px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:32px 0 12px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--bd);border-radius:8px;overflow:hidden;font-size:13px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--bd)}
+tr:last-child td{border-bottom:0}
+th{background:rgba(0,0,0,.3);color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+tr:hover td{background:rgba(255,255,255,.02)}
+.sev-c{color:var(--rd);font-weight:600}.sev-h{color:var(--am);font-weight:600}.sev-m{color:var(--am)}.sev-l{color:var(--gn)}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;background:var(--bd);color:var(--muted);font-size:11px;margin-right:4px}
+.pill.run{background:#00b8e0;color:#000;animation:pulse 1.4s infinite}
+.pill.done{background:var(--gn);color:#000}
+.pill.skip{background:var(--bd);color:var(--muted)}
+.pill.fail{background:var(--rd);color:#fff}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+code{font-family:inherit;color:var(--cy);font-size:12px;background:rgba(0,217,255,.06);padding:1px 4px;border-radius:3px}
+a{color:var(--cy);text-decoration:none}a:hover{text-decoration:underline}
+.bar{height:6px;background:var(--bd);border-radius:3px;overflow:hidden;margin-top:6px}
+.bar>div{height:100%;background:linear-gradient(90deg,var(--gn),var(--am) 60%,var(--rd) 90%);transition:width .3s}
+.empty{padding:48px;text-align:center;color:var(--muted);background:var(--card);border:1px solid var(--bd);border-radius:8px}
+.refresh{position:fixed;top:24px;right:24px;font-size:11px;color:var(--muted)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--gn);margin-right:6px;animation:pulse 2s infinite;vertical-align:middle}
+details{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:12px;margin-bottom:8px}
+summary{cursor:pointer;font-weight:600;font-size:13px}
+summary:hover{color:var(--cy)}
+.cite{font-size:11px;color:var(--muted);margin-top:6px;font-family:inherit}
+.cite .f{color:var(--cy)}
+.tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--bd)}
+.tabs a{padding:8px 16px;color:var(--muted);border-bottom:2px solid transparent;font-size:13px}
+.tabs a.active{color:var(--cy);border-bottom-color:var(--cy)}
+</style>
+</head>
+<body>
+<div class="refresh"><span class="dot"></span>auto-refresh 3s · <span id="ts"></span></div>
+<h1>cqc · runs monitor</h1>
+<div class="sub">Watching: <code>__CWD__</code></div>
+
+<div id="kpi" class="row"></div>
+
+<h2>Active &amp; recent runs</h2>
+<div id="runs"></div>
+
+<h2>All findings (latest run)</h2>
+<div id="findings"></div>
+
+<h2>CLI status</h2>
+<div id="clis"></div>
+
+<script>
+const root='__CWD__';
+const fmt=(n)=>n>=1000?(n/1000).toFixed(1)+'K':n;
+const ago=(secs)=>{
+  if(secs<60)return secs+'s ago';
+  if(secs<3600)return Math.floor(secs/60)+'m ago';
+  if(secs<86400)return Math.floor(secs/3600)+'h ago';
+  return Math.floor(secs/86400)+'d ago';
+};
+
+async function fetchJSON(url){
+  try{const r=await fetch(url);if(!r.ok)return null;return await r.json();}catch(e){return null;}
+}
+async function fetchText(url){
+  try{const r=await fetch(url);if(!r.ok)return null;return await r.text();}catch(e){return null;}
+}
+
+async function refresh(){
+  document.getElementById('ts').textContent=new Date().toLocaleTimeString();
+
+  const idx=await fetchJSON('/api/index');
+  if(!idx){
+    document.getElementById('runs').innerHTML='<div class="empty">No audit-reports/ folder found in '+root+'</div>';
+    return;
+  }
+
+  // KPIs
+  const kpiEl=document.getElementById('kpi');
+  const totalRuns=idx.runs.length;
+  const latest=idx.runs[0]||null;
+  let totalFindings=0,totalCrit=0;
+  if(latest&&latest.counts){
+    totalFindings=(latest.counts.c||0)+(latest.counts.h||0)+(latest.counts.m||0)+(latest.counts.l||0);
+    totalCrit=latest.counts.c||0;
+  }
+  kpiEl.innerHTML=`
+    <div class="kpi cy"><div class="l">Runs</div><div class="v">${totalRuns}</div></div>
+    <div class="kpi gn"><div class="l">Latest score</div><div class="v">${latest?.overall??'—'}/100</div></div>
+    <div class="kpi ${totalCrit>0?'rd':'gn'}"><div class="l">Critical</div><div class="v">${totalCrit}</div></div>
+    <div class="kpi ${latest?.coverage>=99?'gn':'am'}"><div class="l">Coverage</div><div class="v">${latest?.coverage??0}%</div></div>
+  `;
+
+  // Runs table
+  let runsHTML='<table><thead><tr><th>Run ID</th><th>Phase</th><th>Agents</th><th>Findings</th><th>Score</th><th>Started</th></tr></thead><tbody>';
+  if(!idx.runs.length){
+    runsHTML='<div class="empty">No runs yet. Run <code>cqc</code> to create one.</div>';
+  }else{
+    for(const r of idx.runs){
+      const c=r.counts||{};
+      const f=`<span class="sev-c">${c.c||0}c</span> <span class="sev-h">${c.h||0}h</span> <span class="sev-m">${c.m||0}m</span> <span class="sev-l">${c.l||0}l</span>`;
+      const phaseClass={done:'done',dispatching:'run',auditing:'run',failed:'fail'}[r.phase]||'skip';
+      const agents=Object.entries(r.agents||{}).map(([k,v])=>{
+        const cls={done:'done',skipped:'skip',failed:'fail',in_progress:'run',claimed:'run'}[v.status]||'skip';
+        return `<span class="pill ${cls}">${k}</span>`;
+      }).join('');
+      runsHTML+=`<tr><td><code><a href="#${r.id}">${r.id}</a></code></td><td><span class="pill ${phaseClass}">${r.phase||'?'}</span></td><td>${agents||'—'}</td><td>${f}</td><td>${r.overall??'—'}</td><td>${r.started_ago||'—'}</td></tr>`;
+    }
+    runsHTML+='</tbody></table>';
+  }
+  document.getElementById('runs').innerHTML=runsHTML;
+
+  // Findings (latest run)
+  if(latest&&latest.findings&&latest.findings.length){
+    let html='<table><thead><tr><th>ID</th><th>Sev</th><th>Dim</th><th>File:Line</th><th>Rule</th><th>Message</th></tr></thead><tbody>';
+    for(const f of latest.findings.slice(0,30)){
+      html+=`<tr><td><code>${f.id||'—'}</code></td><td><span class="sev-${f.sev}">${(f.sev||'?').toUpperCase()}</span></td><td>${f.dim}</td><td><code>${f.file}:${f.line}</code></td><td>${f.rule||'—'}</td><td>${f.msg||''}</td></tr>`;
+    }
+    html+='</tbody></table>';
+    if(latest.findings.length>30)html+=`<div class="sub">Showing 30 of ${latest.findings.length}</div>`;
+    document.getElementById('findings').innerHTML=html;
+  }else{
+    document.getElementById('findings').innerHTML='<div class="empty">No findings in latest run</div>';
+  }
+
+  // CLI status
+  const clis=await fetchJSON('/api/clis');
+  if(clis){
+    let html='<table><thead><tr><th>CLI</th><th>Status</th><th>Version</th><th>Plan</th><th>Account</th></tr></thead><tbody>';
+    for(const c of clis){
+      const dot=c.installed?'<span class="pill done">●</span>':'<span class="pill skip">○</span>';
+      html+=`<tr><td><strong>${c.name}</strong></td><td>${dot} ${c.installed?'installed':'not detected'}</td><td><code>${c.version||'—'}</code></td><td>${c.plan||'—'}</td><td><code>${c.account||'—'}</code></td></tr>`;
+    }
+    html+='</tbody></table>';
+    document.getElementById('clis').innerHTML=html;
+  }
+}
+
+refresh();
+setInterval(refresh,3000);
+</script>
+</body>
+</html>
+HTMLEOF
+
+# Substitute __CWD__
+sed -i "s|__CWD__|$ABS|g" "$HTML"
+
+# Generate the Python server (with API endpoints)
+cat > "$TMPDIR/server.py" <<PYEOF
+#!/usr/bin/env python3
+"""cqc-ui server — serves /api/* JSON + index.html"""
+import http.server, socketserver, json, os, glob, time, subprocess, re, sys
+from datetime import datetime, timezone
+
+ROOT = "$ABS"
+HTML = "$HTML"
+PORT = $PORT
+
+def time_ago(iso):
+    try:
+        if not iso: return None
+        t = datetime.fromisoformat(iso.replace("Z","+00:00"))
+        delta = (datetime.now(timezone.utc) - t).total_seconds()
+        if delta < 60: return f"{int(delta)}s ago"
+        if delta < 3600: return f"{int(delta/60)}m ago"
+        if delta < 86400: return f"{int(delta/3600)}h ago"
+        return f"{int(delta/86400)}d ago"
+    except: return None
+
+def load_run(run_dir):
+    out = {"id": os.path.basename(run_dir), "phase": "?", "counts": {}, "agents": {}, "findings": []}
+    rj = os.path.join(run_dir, "_run.json")
+    if os.path.isfile(rj):
+        try:
+            with open(rj) as f: data = json.load(f)
+            out["phase"] = data.get("phase") or "done"
+            out["overall"] = data.get("overall")
+            out["agents"] = data.get("agents", {})
+            out["coverage"] = round((data.get("stats", {}).get("coverage_pct", 0)) or 0)
+            out["started_ago"] = time_ago(data.get("started_at", ""))
+        except Exception as e: pass
+    fj = os.path.join(run_dir, "_findings.jsonl")
+    if os.path.isfile(fj):
+        try:
+            with open(fj) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or not line.startswith("{"): continue
+                    try: out["findings"].append(json.loads(line))
+                    except: continue
+            counts = {"c":0,"h":0,"m":0,"l":0}
+            for f in out["findings"]: counts[f.get("sev","l")] = counts.get(f.get("sev","l"),0)+1
+            out["counts"] = counts
+        except: pass
+    return out
+
+def cli_status():
+    out = []
+    for name, pkg in [("claude","@anthropic-ai/claude-code"),("gemini","@google/gemini-cli"),
+                      ("opencode","opencode-ai"),("codex","@openai/codex")]:
+        try:
+            ver = subprocess.run([name,"--version"], capture_output=True, text=True, timeout=3)
+            v = re.search(r"(\d+\.\d+\.\d+)", ver.stdout + ver.stderr)
+            installed = ver.returncode == 0
+        except: installed = False; v = None
+        plan = "—"; acct = "—"
+        if name == "claude" and os.path.isfile(os.path.expanduser("~/.claude/auth.json")):
+            try:
+                with open(os.path.expanduser("~/.claude/auth.json")) as f: a = json.load(f)
+                plan = a.get("subscription_type") or a.get("plan") or "api"
+                em = a.get("email","")
+                acct = em[:1]+"***@***" if em else "—"
+            except: pass
+        elif name == "codex" and os.path.isfile(os.path.expanduser("~/.codex/auth.json")):
+            try:
+                with open(os.path.expanduser("~/.codex/auth.json")) as f: a = json.load(f)
+                plan = a.get("auth_mode","chatgpt")
+            except: pass
+        elif name == "gemini" and os.path.isfile(os.path.expanduser("~/.gemini/google_accounts.json")):
+            try:
+                with open(os.path.expanduser("~/.gemini/google_accounts.json")) as f: a = json.load(f)
+                em = a.get("active","")
+                acct = em[:1]+"***@***" if em else "—"
+                plan = "free"
+            except: pass
+        out.append({"name":name,"installed":installed,"version":v.group(1) if v else None,"plan":plan,"account":acct})
+    return out
+
+class H(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            with open(HTML, "rb") as f: data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type","text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path == "/api/index":
+            runs_dir = os.path.join(ROOT, "audit-reports")
+            runs = []
+            if os.path.isdir(runs_dir):
+                for d in sorted(os.listdir(runs_dir), reverse=True):
+                    full = os.path.join(runs_dir, d)
+                    if os.path.isdir(full): runs.append(load_run(full))
+            data = json.dumps({"runs": runs[:20]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path == "/api/clis":
+            data = json.dumps(cli_status()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(404); self.end_headers()
+
+with socketserver.TCPServer(("127.0.0.1", PORT), H) as httpd:
+    httpd.allow_reuse_address = True
+    print(f"\n  \033[36m▸\033[0m cqc-ui serving \033[1m{ROOT}/audit-reports/\033[0m")
+    print(f"  \033[36m▸\033[0m open \033[1mhttp://localhost:{PORT}\033[0m")
+    print(f"  \033[36m▸\033[0m Ctrl-C to stop\n")
+    try: httpd.serve_forever()
+    except KeyboardInterrupt: print("\n  stopped.")
+PYEOF
+
+python3 "$TMPDIR/server.py"
