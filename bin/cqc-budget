@@ -212,7 +212,7 @@ for cli in claude gemini opencode codex; do
   [ -z "${CLIS[$cli]:-}" ] && continue
   CUR="${WEEK_PCT[$cli]:-0}"
   printf "  ${C_CYAN}%-9s${C_RST} (current %3d%%) → max %% for this run [75]: " "$cli" "$CUR"
-  if [ -e /dev/tty ]; then read -r INPUT < /dev/tty || INPUT=""; else read -r INPUT || INPUT=""; fi
+  if [ -r /dev/tty ]; then read -r INPUT < /dev/tty || INPUT=""; else read -r INPUT || INPUT=""; fi
   INPUT="${INPUT:-75}"
   if ! [[ "$INPUT" =~ ^[0-9]+$ ]] || [ "$INPUT" -lt 0 ] || [ "$INPUT" -gt 100 ]; then
     echo "    ${C_RED}invalid (must be 0-100), using 75${C_RST}"
@@ -223,7 +223,7 @@ done
 
 echo ""
 echo "${C_BOLD}▸ Stop the entire audit run if any CLI hits its max? [Y/n]:${C_RST} "
-if [ -e /dev/tty ]; then read -r STOP_HARD < /dev/tty || STOP_HARD="Y"; else read -r STOP_HARD || STOP_HARD="Y"; fi
+if [ -r /dev/tty ]; then read -r STOP_HARD < /dev/tty || STOP_HARD="Y"; else read -r STOP_HARD || STOP_HARD="Y"; fi
 STOP_HARD="${STOP_HARD:-Y}"
 
 echo ""
@@ -232,7 +232,7 @@ echo "    claude   → d4 d6 d13       (architecture · security · cache)"
 echo "    gemini   → d12 d8 d9        (deps · dead-code · docs)"
 echo "    opencode → d1 d3 d11 d14 d15 (bulk grep)"
 echo "    codex    → d2 d5 d7 d10     (types · perf · a11y · ci)"
-if [ -e /dev/tty ]; then read -r DEFAULT_ASSIGN < /dev/tty || DEFAULT_ASSIGN="Y"; else read -r DEFAULT_ASSIGN || DEFAULT_ASSIGN="Y"; fi
+if [ -r /dev/tty ]; then read -r DEFAULT_ASSIGN < /dev/tty || DEFAULT_ASSIGN="Y"; else read -r DEFAULT_ASSIGN || DEFAULT_ASSIGN="Y"; fi
 DEFAULT_ASSIGN="${DEFAULT_ASSIGN:-Y}"
 
 # ──────────────────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ CONFIG_PATH="${PWD}/cqc.config.yaml"
 if [ -f "$CONFIG_PATH" ]; then
   echo ""
   echo "${C_AMBER}⚠ cqc.config.yaml already exists. Overwrite? [y/N]:${C_RST} "
-  if [ -e /dev/tty ]; then read -r OVERWRITE < /dev/tty || OVERWRITE="N"; else read -r OVERWRITE || OVERWRITE="N"; fi
+  if [ -r /dev/tty ]; then read -r OVERWRITE < /dev/tty || OVERWRITE="N"; else read -r OVERWRITE || OVERWRITE="N"; fi
   OVERWRITE="${OVERWRITE:-N}"
   [[ "$OVERWRITE" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
 fi
