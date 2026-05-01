@@ -346,13 +346,22 @@ For each file: `loc` via `wc -l`, `size` via `stat -c%s`, `mods30d` via `git log
 
 ---
 
-# Phase 2 — Dispatch sub-agents (parallel groups)
+# Phase 2 — Dispatch sub-agents (ordered: quality first, security last)
+
+**Dispatch order is intentional:** code-quality dimensions run FIRST, security/auth runs LAST. Reasoning:
+1. Quality issues found early give context for security review (e.g. an `as any` discovered by D1 may itself be the vector D4 needs to flag).
+2. Security findings are the highest-stake outputs — running them last means they go into the report with full context from prior dimensions.
+3. If a quality run fails or times out, security still runs (the gate is non-negotiable).
 
 ```
-GROUP A (parallel, max 4 at a time): d1 d4 d6 d8 d9 d11 d13 d14 d15
-GROUP B (sequential, heavy tooling):  d2 d3 d5 d10 d12
-GROUP C (after A):                    d7
+GROUP 1 — Quality (parallel, max 4):       d1 d6 d8 d9 d13 d14 d15
+GROUP 2 — Types & Tests (sequential):       d2 d3
+GROUP 3 — Performance & Bundle (sequential): d5 d10 d12
+GROUP 4 — UX & i18n (parallel):              d7 d11
+GROUP 5 — Security & Auth (LAST, sequential): d4
 ```
+
+D4 Security ALWAYS runs last. Even on `--no-tools`, even on PR scope, even on resume. If the orchestrator is interrupted, on resume D4 is queued to run after any unfinished prior groups.
 
 For each skill in a group:
 
@@ -361,10 +370,16 @@ For each skill in a group:
 3. Continuously rewrite `_status.txt` every 5 s:
 
 ```
-[auditing] d1✅ d4✅ d6⏳ d8✅ d9✅ d11⏳ d13⌛ d14⌛ d15⌛  4/15 done · cov 47%
+[Group 1: quality] d1✅ d6⏳ d8✅ d9✅ d13⏳ d14⌛ d15⌛  3/7 done · cov 47%
+[Group 2: types]   d2⌛ d3⌛
+[Group 3: perf]    d5⌛ d10⌛ d12⌛
+[Group 4: ux]      d7⌛ d11⌛
+[Group 5: SEC]     d4⌛  ← runs LAST
 ```
 
 `✅`done · `⏳`running · `⌛`queued · `❌`failed · `⏰`timeout.
+
+**Why D4 last:** quality findings (D1 type bypasses, D6 layer violations, D13 cache key drift, etc.) often surface attack surfaces that the security pass uses. Running D4 first wastes context; running it last makes its findings the headline of the final REPORT.
 
 ## 2.1 Inline coverage sweep (no separate skill)
 
