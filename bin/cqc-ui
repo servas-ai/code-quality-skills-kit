@@ -11,11 +11,11 @@ set -euo pipefail
 umask 077
 
 PORT="${CQC_UI_PORT:-7331}"
-TARGET="${1:-.}"
+TARGET="."
 
 while [ "${1:-}" != "" ]; do
   case "$1" in
-    --port)  PORT="$2"; shift ;;
+    --port)   PORT="$2"; shift ;;
     --port=*) PORT="${1#--port=}" ;;
     -h|--help)
       cat <<HELP
@@ -27,6 +27,7 @@ Usage:
   cqc-ui --port 8080    # custom port (default 7331)
 HELP
       exit 0 ;;
+    --*) echo "Unknown flag: $1" >&2; exit 1 ;;
     *) [ -d "$1" ] && TARGET="$1" ;;
   esac
   shift
