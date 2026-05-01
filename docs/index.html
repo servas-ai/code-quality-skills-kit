@@ -64,6 +64,7 @@
 
 <nav class="topnav" aria-label="Main navigation">
   <a class="logo" href="#hero">CQC</a>
+  <a href="#dispatch">Dispatch</a>
   <a href="#skills">Skills</a>
   <a href="#install">Install</a>
   <a href="#demo">Demo</a>
@@ -100,7 +101,6 @@
     .hero * { box-sizing: border-box; }
     .hero a { color: inherit; text-decoration: none; }
 
-    /* Top nav */
     .hero__nav {
       display: flex;
       align-items: center;
@@ -142,7 +142,6 @@
       border-radius: 2px;
     }
 
-    /* Body */
     .hero__body {
       flex: 1;
       display: flex;
@@ -154,7 +153,6 @@
       gap: 2rem;
     }
 
-    /* ASCII banner */
     .hero__banner {
       display: inline-block;
       margin: 0;
@@ -170,7 +168,6 @@
       letter-spacing: 0;
     }
 
-    /* Tagline + subtitle */
     .hero__tagline {
       color: var(--muted);
       font-size: 0.875rem;
@@ -188,7 +185,6 @@
       margin: 0;
     }
 
-    /* CTAs */
     .hero__ctas {
       display: flex;
       gap: 0.875rem;
@@ -233,7 +229,6 @@
       outline-offset: 3px;
     }
 
-    /* Stats grid */
     .hero__stats {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -263,7 +258,6 @@
       text-transform: uppercase;
     }
 
-    /* Mobile */
     @media (max-width: 640px) {
       .hero__ctas { flex-direction: column; align-items: stretch; width: 100%; max-width: 320px; }
       .hero__btn { justify-content: center; }
@@ -368,6 +362,568 @@
   </script>
 </section>
 
+<!-- ============ _dispatch.html — Full-width CLI Status Dashboard ============ -->
+<section class="dispatch" id="dispatch" aria-labelledby="dispatch-title">
+  <style>
+    .dispatch{--bg:#0a0d12;--bg-elevated:#14181f;--bg-deep:#07090d;--border:#2a2f3b;--border-soft:#1d2230;--fg:#e6e8eb;--muted:#8b93a1;--accent:#00d9ff;--accent-2:#ff5566;--success:#4ade80;--warning:#ffc857;--critical:#ff5566;--plan-max:var(--success);--plan-pro:var(--accent);--plan-free:var(--muted);--plan-api:var(--warning);background:var(--bg);color:var(--fg);font-family:'JetBrains Mono','Fira Code',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:4rem clamp(1rem,3vw,2rem);max-width:1400px;margin:0 auto;box-sizing:border-box}
+    .dispatch *,.dispatch *::before,.dispatch *::after{box-sizing:border-box}
+    .dispatch__head{margin-bottom:1.5rem}
+    .dispatch__eyebrow{color:var(--accent);font-size:.75rem;letter-spacing:.25em;text-transform:uppercase;display:block;margin-bottom:.4rem}
+    .dispatch__title{font-size:clamp(1.5rem,3vw,2.1rem);font-weight:700;letter-spacing:-.01em;margin:0 0 .4rem}
+    .dispatch__subtitle{color:var(--muted);font-size:.95rem;margin:0;max-width:70ch}
+    .ctrl{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:1.5rem 1.5rem 1.25rem;margin-bottom:1.5rem}
+    .ctrl__title{display:flex;align-items:center;gap:.6rem;font-size:.8rem;color:var(--muted);letter-spacing:.18em;text-transform:uppercase;margin:0 0 1.1rem}
+    .ctrl__title::before{content:"";flex:0 0 .5rem;height:.5rem;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent)}
+    .ctrl__title::after{content:"";flex:1;height:1px;background:var(--border)}
+    .ctrl__grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1.4fr);gap:1.25rem 2rem}
+    @media(max-width:860px){.ctrl__grid{grid-template-columns:1fr}}
+    .ctrl__row{display:flex;flex-direction:column;gap:.55rem}
+    .ctrl__label{display:flex;align-items:baseline;justify-content:space-between;font-size:.85rem;color:var(--fg)}
+    .ctrl__hint{color:var(--muted);font-size:.75rem}
+    .ctrl__value{color:var(--accent);font-variant-numeric:tabular-nums;font-weight:600;font-size:.95rem}
+    .ctrl__slider{-webkit-appearance:none;appearance:none;width:100%;height:6px;border-radius:3px;background:linear-gradient(to right,var(--accent) 0%,var(--accent) 75%,var(--border) 75%,var(--border) 100%);outline:none;cursor:pointer}
+    .ctrl__slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;background:var(--bg-elevated);border:2px solid var(--accent);cursor:grab;box-shadow:0 0 0 4px rgba(0,217,255,.12);transition:transform .15s ease,box-shadow .15s ease}
+    .ctrl__slider::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--bg-elevated);border:2px solid var(--accent);cursor:grab}
+    .ctrl__slider:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+    .ctrl__slider:active::-webkit-slider-thumb{transform:scale(1.15);cursor:grabbing}
+    .ctrl__radios{display:flex;gap:.5rem;flex-wrap:wrap}
+    .ctrl__radio{position:relative}
+    .ctrl__radio input{position:absolute;opacity:0;pointer-events:none}
+    .ctrl__radio span{display:inline-block;padding:.5rem .85rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem;color:var(--muted);cursor:pointer;transition:color .15s,border-color .15s,background .15s;user-select:none}
+    .ctrl__radio span:hover{color:var(--fg);border-color:var(--accent)}
+    .ctrl__radio input:checked + span{color:var(--accent);border-color:var(--accent);background:rgba(0,217,255,.06)}
+    .ctrl__radio input:focus-visible + span{outline:2px solid var(--accent);outline-offset:2px}
+    .ctrl__caps{display:flex;gap:.85rem;flex-wrap:wrap}
+    .ctrl__cap{display:flex;align-items:center;gap:.5rem}
+    .ctrl__cap-label{color:var(--muted);font-size:.8rem}
+    .ctrl__cap-currency{color:var(--accent);font-weight:600}
+    .ctrl__num{width:5.5rem;padding:.45rem .6rem;background:var(--bg-deep);border:1px solid var(--border);color:var(--fg);border-radius:5px;font-family:inherit;font-size:.9rem;font-variant-numeric:tabular-nums;text-align:right}
+    .ctrl__num:focus{outline:2px solid var(--accent);outline-offset:2px;border-color:var(--accent)}
+    .ctrl__num::-webkit-outer-spin-button,.ctrl__num::-webkit-inner-spin-button{opacity:.5}
+    .ctrl__select{background:var(--bg-deep);border:1px solid var(--border);color:var(--fg);padding:.45rem .6rem;font-family:inherit;font-size:.85rem;border-radius:5px;cursor:pointer}
+    .ctrl__select:focus{outline:2px solid var(--accent);outline-offset:2px}
+    .ctrl__actions{grid-column:1/-1;display:flex;gap:.75rem;justify-content:flex-end;flex-wrap:wrap;padding-top:1rem;border-top:1px solid var(--border);margin-top:.5rem}
+    .ctrl__btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.6rem 1.1rem;border-radius:6px;cursor:pointer;transition:transform .12s,background .15s,color .15s,border-color .15s;border:1px solid transparent}
+    .ctrl__btn--primary{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+    .ctrl__btn--primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px -8px rgba(0,217,255,.55)}
+    .ctrl__btn--ghost{background:transparent;color:var(--muted);border-color:var(--border)}
+    .ctrl__btn--ghost:hover{color:var(--fg);border-color:var(--accent)}
+    .ctrl__btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+    .ctrl__btn--ok{background:var(--success);border-color:var(--success);color:var(--bg)}
+    .grid-wrap{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+    .grid-wrap__head{display:flex;justify-content:space-between;align-items:center;padding:.85rem 1.25rem;border-bottom:1px solid var(--border);background:var(--bg-deep);font-size:.78rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+    .grid-wrap__head .demo-pill{background:rgba(0,217,255,.08);color:var(--accent);border:1px solid var(--accent);padding:.15rem .5rem;border-radius:999px;font-size:.65rem;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+    .grid-scroll{overflow-x:auto}
+    .cli-table{width:100%;min-width:1100px;border-collapse:separate;border-spacing:0;font-size:.85rem}
+    .cli-table thead th{text-align:left;padding:.85rem .85rem;font-weight:600;font-size:.72rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;border-bottom:1px solid var(--border);background:var(--bg-deep);position:sticky;top:0}
+    .cli-table tbody td{padding:.95rem .85rem;border-bottom:1px solid var(--border-soft);vertical-align:middle}
+    .cli-table tbody tr:last-child td{border-bottom:none}
+    .cli-table tbody tr{transition:background .15s ease}
+    .cli-table tbody tr:hover{background:rgba(0,217,255,.03)}
+    .cli-table tbody tr.is-disabled{opacity:.45}
+    .cli-table tbody tr.is-disabled td{background:transparent}
+    .cli-check{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+    .cli-check:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .cli-name{display:flex;align-items:center;gap:.6rem;font-weight:600}
+    .cli-glyph{color:var(--accent);font-size:1.1rem;filter:drop-shadow(0 0 4px rgba(0,217,255,.4))}
+    .cli-status{display:inline-flex;align-items:center;gap:.5rem;font-size:.8rem}
+    .cli-status::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 6px var(--success)}
+    .cli-status--off{color:var(--muted)}
+    .cli-status--off::before{background:var(--muted);box-shadow:none;opacity:.5}
+    .demo-mark{margin-left:.45rem;padding:.12rem .4rem;border-radius:999px;font-size:.6rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);border:1px solid rgba(0,217,255,.4);background:rgba(0,217,255,.05)}
+    .cli-account{color:var(--muted);font-variant-numeric:tabular-nums;font-size:.8rem;letter-spacing:.02em}
+    .plan-pill{display:inline-block;padding:.18rem .55rem;border-radius:999px;font-size:.7rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;border:1px solid currentColor}
+    .plan-pill--max{color:var(--plan-max)}
+    .plan-pill--pro{color:var(--plan-pro)}
+    .plan-pill--free{color:var(--plan-free)}
+    .plan-pill--api{color:var(--plan-api)}
+    .bar{position:relative;width:100%;min-width:100px;background:var(--border-soft);border-radius:3px;height:8px;overflow:hidden}
+    .bar__fill{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,var(--success),var(--accent));border-radius:3px;transition:width .5s ease-out,background .3s ease}
+    .bar--mini{height:5px;min-width:70px}
+    .bar__label{display:flex;justify-content:space-between;align-items:baseline;font-size:.78rem;gap:.5rem;margin-bottom:.25rem;font-variant-numeric:tabular-nums}
+    .bar__amt{color:var(--fg);font-weight:600}
+    .bar__pct{color:var(--muted)}
+    .bar--warn .bar__fill{background:linear-gradient(90deg,var(--warning),var(--accent-2))}
+    .bar--crit .bar__fill{background:linear-gradient(90deg,var(--accent-2),var(--critical))}
+    .resets-cell{color:var(--muted);font-variant-numeric:tabular-nums;font-size:.82rem}
+    .skill-badges-cell{display:flex;flex-wrap:wrap;gap:.25rem}
+    .skill-badges-cell span{font-size:.65rem;padding:.15rem .45rem;border:1px solid var(--border);border-radius:999px;color:var(--fg);background:rgba(0,217,255,.04)}
+    .resets{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:1.5rem 0}
+    .reset-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:1rem 1.1rem}
+    .reset-card__label{color:var(--muted);font-size:.7rem;letter-spacing:.18em;text-transform:uppercase;margin:0 0 .4rem}
+    .reset-card__time{color:var(--accent);font-size:1.4rem;font-weight:700;font-variant-numeric:tabular-nums;margin:0;text-shadow:0 0 8px rgba(0,217,255,.25)}
+    .reset-card__sub{color:var(--muted);font-size:.75rem;margin:.25rem 0 0}
+    .live-config{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:1.5rem 0}
+    .live-config__head{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;border-bottom:1px solid var(--border);background:var(--bg-deep)}
+    .live-config__name{color:var(--muted);font-size:.78rem;display:flex;align-items:center;gap:.5rem}
+    .live-config__name::before{content:"";width:.5rem;height:.5rem;border-radius:50%;background:var(--success);box-shadow:0 0 6px var(--success)}
+    .live-config__copy{background:var(--bg-elevated);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:.72rem;padding:.32rem .7rem;border-radius:4px;cursor:pointer;transition:color .15s,border-color .15s}
+    .live-config__copy:hover{color:var(--fg);border-color:var(--accent)}
+    .live-config__copy:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .live-config__copy--ok{color:var(--success);border-color:var(--success)}
+    .live-config__body{margin:0;padding:1rem 1.25rem;font-size:.82rem;line-height:1.65;white-space:pre;overflow-x:auto;color:var(--fg)}
+    .live-config__body .yk{color:var(--accent)}
+    .live-config__body .yv{color:var(--success)}
+    .live-config__body .yc{color:var(--muted)}
+    .summary{background:linear-gradient(180deg,rgba(0,217,255,.04),transparent),var(--bg-elevated);border:1px solid var(--accent);border-radius:10px;padding:1.25rem 1.5rem;box-shadow:0 0 0 1px rgba(0,217,255,.12),0 12px 36px -16px rgba(0,217,255,.4)}
+    .summary__line{color:var(--fg);font-size:.92rem;line-height:1.65;margin:0}
+    .summary__line + .summary__line{margin-top:.4rem;color:var(--muted);font-size:.85rem}
+    .summary__line strong{color:var(--accent);font-weight:600}
+    .summary__actions{margin-top:1rem;display:flex;gap:.75rem;flex-wrap:wrap}
+    .summary__btn{font-family:inherit;font-size:.85rem;font-weight:600;padding:.65rem 1.15rem;border-radius:6px;cursor:pointer;border:1px solid transparent;transition:all .15s ease;text-decoration:none;display:inline-flex;align-items:center;gap:.4rem}
+    .summary__btn--primary{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+    .summary__btn--primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px -8px rgba(0,217,255,.55)}
+    .summary__btn--ghost{background:transparent;color:var(--fg);border-color:var(--border)}
+    .summary__btn--ghost:hover{color:var(--accent);border-color:var(--accent)}
+    .summary__btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+    .summary__btn--ok{background:var(--success);border-color:var(--success);color:var(--bg)}
+    @media(max-width:720px){.dispatch{padding:3rem 1rem}.ctrl,.grid-wrap,.live-config,.summary,.reset-card{border-radius:8px}.ctrl__caps{flex-direction:column;align-items:flex-start}.ctrl__num{width:100%}}
+    @media(max-width:480px){.ctrl__row{gap:.4rem}.ctrl__radios{gap:.35rem}.summary__actions{flex-direction:column}.summary__btn{width:100%;justify-content:center}}
+    @media(prefers-reduced-motion:reduce){.dispatch *,.dispatch *::before,.dispatch *::after{transition:none!important;animation:none!important}}
+  </style>
+
+  <header class="dispatch__head">
+    <span class="dispatch__eyebrow">Dispatcher</span>
+    <h2 class="dispatch__title" id="dispatch-title">CLI Status &amp; Budget Controls</h2>
+    <p class="dispatch__subtitle">
+      Live placeholder dashboard showing how the kit reports detected CLIs,
+      plan tier, weekly budget, and scheduled resets. All values shown here
+      are demo data — drop in your repo to see the real numbers.
+    </p>
+  </header>
+
+  <!-- ── Budget Controls ─────────────────────────────────────── -->
+  <div class="ctrl" role="group" aria-labelledby="ctrl-title">
+    <h3 class="ctrl__title" id="ctrl-title">Budget Controls</h3>
+
+    <div class="ctrl__grid">
+      <div class="ctrl__row">
+        <label class="ctrl__label" for="ctrl-max-pct">
+          <span>Max % of week budget per CLI</span>
+          <span class="ctrl__value" id="ctrl-max-pct-val">75%</span>
+        </label>
+        <input class="ctrl__slider" type="range" id="ctrl-max-pct"
+               min="0" max="100" step="5" value="75"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="75"
+               aria-label="Maximum percentage of weekly budget per CLI">
+        <span class="ctrl__hint">Each CLI stops drawing once it reaches this share of the weekly cap.</span>
+      </div>
+
+      <div class="ctrl__row">
+        <span class="ctrl__label" id="ctrl-stop-label">Stop at threshold</span>
+        <div class="ctrl__radios" role="radiogroup" aria-labelledby="ctrl-stop-label">
+          <label class="ctrl__radio">
+            <input type="radio" name="stop-at" value="75">
+            <span>75% reached</span>
+          </label>
+          <label class="ctrl__radio">
+            <input type="radio" name="stop-at" value="90" checked>
+            <span>90% reached</span>
+          </label>
+          <label class="ctrl__radio">
+            <input type="radio" name="stop-at" value="100">
+            <span>100% reached</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="ctrl__row">
+        <span class="ctrl__label">Spend caps (USD)</span>
+        <div class="ctrl__caps">
+          <div class="ctrl__cap">
+            <span class="ctrl__cap-label">Daily</span>
+            <span class="ctrl__cap-currency">$</span>
+            <input class="ctrl__num" type="number" id="ctrl-day-cap"
+                   min="0" max="9999" value="50" step="1"
+                   aria-label="Daily spend cap in USD">
+          </div>
+          <div class="ctrl__cap">
+            <span class="ctrl__cap-label">Weekly</span>
+            <span class="ctrl__cap-currency">$</span>
+            <input class="ctrl__num" type="number" id="ctrl-week-cap"
+                   min="0" max="99999" value="200" step="5"
+                   aria-label="Weekly spend cap in USD">
+          </div>
+        </div>
+      </div>
+
+      <div class="ctrl__row">
+        <label class="ctrl__label" for="ctrl-reset-day">
+          <span>Reset weekly limit on</span>
+        </label>
+        <select class="ctrl__select" id="ctrl-reset-day" aria-label="Day of week for weekly reset">
+          <option value="1" selected>Monday 00:00 UTC</option>
+          <option value="0">Sunday 00:00 UTC</option>
+          <option value="6">Saturday 00:00 UTC</option>
+        </select>
+      </div>
+
+      <div class="ctrl__actions">
+        <button class="ctrl__btn ctrl__btn--ghost" type="button" id="ctrl-reset">Reset to Defaults</button>
+        <button class="ctrl__btn ctrl__btn--primary" type="button" id="ctrl-apply">Apply Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CLI table ───────────────────────────────────────────── -->
+  <div class="grid-wrap">
+    <div class="grid-wrap__head">
+      <span>CLI Status Matrix · live placeholder data</span>
+      <span class="demo-pill">demo</span>
+    </div>
+    <div class="grid-scroll">
+      <table class="cli-table" id="cli-table" aria-label="CLI status table">
+        <thead>
+          <tr>
+            <th scope="col" style="width: 56px;">Enable</th>
+            <th scope="col" style="width: 120px;">CLI</th>
+            <th scope="col" style="width: 130px;">Status</th>
+            <th scope="col" style="width: 160px;">Account</th>
+            <th scope="col" style="width: 90px;">Plan</th>
+            <th scope="col" style="width: 150px;">Day used</th>
+            <th scope="col" style="width: 220px;">Week used</th>
+            <th scope="col" style="width: 110px;">Resets in</th>
+            <th scope="col">Skills</th>
+          </tr>
+        </thead>
+        <tbody id="cli-tbody">
+          <!-- rows populated by JS from CLIs[] -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Reset countdown widget ──────────────────────────────── -->
+  <div class="resets" aria-label="Reset countdowns">
+    <div class="reset-card">
+      <p class="reset-card__label">Daily reset</p>
+      <p class="reset-card__time" id="reset-daily" aria-live="polite">--h --m --s</p>
+      <p class="reset-card__sub">Next 00:00 UTC</p>
+    </div>
+    <div class="reset-card">
+      <p class="reset-card__label">Weekly reset</p>
+      <p class="reset-card__time" id="reset-weekly" aria-live="polite">--d --h --m</p>
+      <p class="reset-card__sub" id="reset-weekly-sub">Monday 00:00 UTC</p>
+    </div>
+    <div class="reset-card">
+      <p class="reset-card__label">Active CLIs</p>
+      <p class="reset-card__time" id="active-clis" aria-live="polite">4 / 4</p>
+      <p class="reset-card__sub">checked rows above</p>
+    </div>
+  </div>
+
+  <!-- ── Live config preview ─────────────────────────────────── -->
+  <div class="live-config">
+    <div class="live-config__head">
+      <span class="live-config__name">cqc.config.yaml · live preview</span>
+      <button class="live-config__copy" type="button" id="copy-live-config" aria-label="Copy generated cqc.config.yaml">Copy</button>
+    </div>
+    <pre class="live-config__body" id="live-config-body" aria-live="polite"></pre>
+  </div>
+
+  <!-- ── Selection summary + CTA ─────────────────────────────── -->
+  <div class="summary" aria-live="polite">
+    <p class="summary__line" id="summary-clis">
+      You selected: <strong id="sum-cli-count">3 of 4 CLIs</strong> ·
+      <strong id="sum-week-pct">75%</strong> week budget ·
+      daily cap <strong id="sum-day-cap">$50</strong> ·
+      stop at <strong id="sum-stop">90%</strong>
+    </p>
+    <p class="summary__line" id="summary-skills">
+      Skills will fan out to: <span id="sum-fanout">claude (d4 d6 d13) · gemini (d12 d8 d9) · codex (d2 d5 d7 d10)</span>
+    </p>
+    <div class="summary__actions">
+      <button class="summary__btn summary__btn--primary" type="button" id="sum-copy">
+        Copy generated cqc.config.yaml
+      </button>
+      <a class="summary__btn summary__btn--ghost"
+         href="https://github.com/servas-ai/code-quality-skills-kit#install"
+         rel="noopener">
+        Try in your repo →
+      </a>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // Placeholder CLI data (no personal info)
+      var CLIs = [
+        {
+          id: 'claude', name: 'Claude', glyph: '◆',
+          installed: true, account: 'u***@e***.com', plan: 'Max',
+          dayUsed: 46.02, weekUsed: 134, weekTotal: 200,
+          resetIn: '4d 2h', skills: ['d4', 'd6', 'd13']
+        },
+        {
+          id: 'gemini', name: 'Gemini', glyph: '✦',
+          installed: true, account: 'u***@e***.com', plan: 'Free',
+          dayUsed: 0,    weekUsed: 0,   weekTotal: 200,
+          resetIn: '4d 2h', skills: ['d12', 'd8', 'd9']
+        },
+        {
+          id: 'opencode', name: 'OpenCode', glyph: '▣',
+          installed: true, account: 'local-model', plan: 'API',
+          dayUsed: 8.12, weekUsed: 23,  weekTotal: 200,
+          resetIn: '4d 2h', skills: ['d1', 'd3', 'd11', 'd14', 'd15']
+        },
+        {
+          id: 'codex', name: 'Codex', glyph: '◈',
+          installed: true, account: '****-token', plan: 'Pro',
+          dayUsed: 12.40, weekUsed: 56, weekTotal: 200,
+          resetIn: '4d 2h', skills: ['d2', 'd5', 'd7', 'd10']
+        }
+      ];
+
+      var DEFAULTS = { maxPct: 75, stopAt: '90', dayCap: 50, weekCap: 200, resetDay: '1' };
+      var state = Object.assign({}, DEFAULTS);
+
+      var $ = function (id) { return document.getElementById(id); };
+
+      // Render the CLI rows
+      function renderRows() {
+        var tbody = $('cli-tbody');
+        if (!tbody) return;
+        tbody.innerHTML = '';
+        CLIs.forEach(function (c, idx) {
+          var pct = c.weekTotal > 0 ? Math.round((c.weekUsed / c.weekTotal) * 100) : 0;
+          var dayPct = state.dayCap > 0 ? Math.min(100, Math.round((c.dayUsed / state.dayCap) * 100)) : 0;
+          var barCls = pct > 85 ? 'bar--crit' : pct > 60 ? 'bar--warn' : '';
+          var planCls = 'plan-pill plan-pill--' + c.plan.toLowerCase();
+
+          var tr = document.createElement('tr');
+          tr.setAttribute('data-cli-id', c.id);
+          tr.innerHTML =
+            '<td><input class="cli-check" type="checkbox" id="chk-' + c.id + '"' + ' checked aria-label="Enable ' + c.name + '"></td>' + '<td><span class="cli-name"><span class="cli-glyph" aria-hidden="true">' + c.glyph + '</span>' + c.name + '</span></td>' + '<td>' + '<span class="cli-status' + (c.installed ? '' : ' cli-status--off') + '">' +
+                (c.installed ? 'installed' : 'not detected') +
+              '</span>' + '<span class="demo-mark" title="placeholder data">demo</span>' + '</td>' + '<td><span class="cli-account">' + c.account + '</span></td>' + '<td><span class="' + planCls + '">' + c.plan + '</span></td>' + '<td>' + '<div class="bar__label"><span class="bar__amt">$' + c.dayUsed.toFixed(2) + '</span><span class="bar__pct">' + dayPct + '%</span></div>' + '<div class="bar bar--mini"><div class="bar__fill" style="width:' + dayPct + '%"></div></div>' + '</td>' + '<td>' + '<div class="bar__label"><span class="bar__amt">$' + c.weekUsed + ' / $' + c.weekTotal + '</span><span class="bar__pct">' + pct + '%</span></div>' + '<div class="bar ' + barCls + '"><div class="bar__fill" style="width:' + pct + '%"></div></div>' + '</td>' + '<td><span class="resets-cell">' + c.resetIn + '</span></td>' + '<td>' + '<div class="skill-badges-cell">' +
+                c.skills.map(function (s) { return '<span>' + s + '</span>'; }).join('') +
+              '</div>' + '</td>';
+          tbody.appendChild(tr);
+
+          var chk = tr.querySelector('input[type="checkbox"]');
+          chk.addEventListener('change', function () {
+            tr.classList.toggle('is-disabled', !chk.checked);
+            renderConfig();
+            renderSummary();
+          });
+        });
+      }
+
+      // Live config preview
+      function selectedCliIds() {
+        var rows = document.querySelectorAll('#cli-tbody tr');
+        var out = [];
+        rows.forEach(function (tr) {
+          var chk = tr.querySelector('input[type="checkbox"]');
+          if (chk && chk.checked) out.push(tr.getAttribute('data-cli-id'));
+        });
+        return out;
+      }
+
+      function renderConfig() {
+        var ids = selectedCliIds();
+        var clisYaml = ids.length
+          ? ids.map(function (x) { return '    - ' + x; }).join('\n')
+          : '    []';
+        var resetMap = { '0': 'sunday', '1': 'monday', '6': 'saturday' };
+        var lines = [
+          '<span class="yc"># cqc.config.yaml — generated from dashboard</span>',
+          '<span class="yk">version</span>: <span class="yv">3.6</span>',
+          '<span class="yk">budget</span>:',
+          '  <span class="yk">max_pct_per_cli</span>: <span class="yv">' + state.maxPct + '</span>',
+          '  <span class="yk">stop_at_pct</span>: <span class="yv">' + state.stopAt + '</span>',
+          '  <span class="yk">daily_cap_usd</span>: <span class="yv">' + state.dayCap + '</span>',
+          '  <span class="yk">weekly_cap_usd</span>: <span class="yv">' + state.weekCap + '</span>',
+          '  <span class="yk">weekly_reset</span>: <span class="yv">' + (resetMap[state.resetDay] || 'monday') + '</span>',
+          '  <span class="yk">reset_tz</span>: <span class="yv">UTC</span>',
+          '<span class="yk">multi_cli</span>:',
+          '  <span class="yk">enabled</span>: <span class="yv">' + (ids.length > 1 ? 'true' : 'false') + '</span>',
+          '  <span class="yk">agents</span>:',
+          clisYaml,
+          '<span class="yk">output</span>:',
+          '  <span class="yk">dir</span>: <span class="yv">audit-reports/</span>',
+          '  <span class="yk">formats</span>: [<span class="yv">compact</span>, <span class="yv">html</span>, <span class="yv">fix-prompts</span>]'
+        ];
+        $('live-config-body').innerHTML = lines.join('\n');
+      }
+
+      // Summary line
+      function renderSummary() {
+        var ids = selectedCliIds();
+        $('sum-cli-count').textContent = ids.length + ' of ' + CLIs.length + ' CLIs';
+        $('sum-week-pct').textContent = state.maxPct + '%';
+        $('sum-day-cap').textContent = '$' + state.dayCap;
+        $('sum-stop').textContent = state.stopAt + '%';
+
+        var fan = CLIs.filter(function (c) { return ids.indexOf(c.id) !== -1; })
+                      .map(function (c) {
+                        return c.id + ' (' + c.skills.join(' ') + ')';
+                      })
+                      .join(' · ');
+        $('sum-fanout').textContent = fan || 'no CLIs selected';
+        $('active-clis').textContent = ids.length + ' / ' + CLIs.length;
+      }
+
+      // Slider gradient + live label
+      function paintSlider() {
+        var s = $('ctrl-max-pct');
+        var v = parseInt(s.value, 10);
+        s.style.background =
+          'linear-gradient(to right, var(--accent) 0%, var(--accent) ' + v + '%, ' +
+          'var(--border) ' + v + '%, var(--border) 100%)';
+        s.setAttribute('aria-valuenow', String(v));
+        $('ctrl-max-pct-val').textContent = v + '%';
+        state.maxPct = v;
+      }
+
+      // Wire controls
+      function wireControls() {
+        $('ctrl-max-pct').addEventListener('input', function () {
+          paintSlider();
+          renderConfig();
+          renderSummary();
+        });
+        document.querySelectorAll('input[name="stop-at"]').forEach(function (r) {
+          r.addEventListener('change', function () {
+            if (r.checked) { state.stopAt = r.value; renderConfig(); renderSummary(); }
+          });
+        });
+        $('ctrl-day-cap').addEventListener('input', function () {
+          var v = parseInt($('ctrl-day-cap').value, 10);
+          state.dayCap = isNaN(v) ? 0 : v;
+          renderRows();
+          renderConfig();
+          renderSummary();
+        });
+        $('ctrl-week-cap').addEventListener('input', function () {
+          var v = parseInt($('ctrl-week-cap').value, 10);
+          state.weekCap = isNaN(v) ? 0 : v;
+          // Note: per-CLI weekTotal stays the same (placeholder); cap in summary updates.
+          renderConfig();
+          renderSummary();
+        });
+        $('ctrl-reset-day').addEventListener('change', function () {
+          state.resetDay = $('ctrl-reset-day').value;
+          renderConfig();
+          updateTimers();
+        });
+
+        $('ctrl-apply').addEventListener('click', function (ev) {
+          var btn = ev.currentTarget;
+          var prev = btn.textContent;
+          btn.textContent = '✓ Applied';
+          btn.classList.add('ctrl__btn--ok');
+          setTimeout(function () {
+            btn.textContent = prev;
+            btn.classList.remove('ctrl__btn--ok');
+          }, 1600);
+          renderConfig();
+          renderSummary();
+        });
+        $('ctrl-reset').addEventListener('click', function () {
+          state = Object.assign({}, DEFAULTS);
+          $('ctrl-max-pct').value = String(state.maxPct);
+          paintSlider();
+          document.querySelectorAll('input[name="stop-at"]').forEach(function (r) {
+            r.checked = (r.value === state.stopAt);
+          });
+          $('ctrl-day-cap').value = state.dayCap;
+          $('ctrl-week-cap').value = state.weekCap;
+          $('ctrl-reset-day').value = state.resetDay;
+          document.querySelectorAll('#cli-tbody input[type="checkbox"]').forEach(function (c) {
+            c.checked = true;
+            c.closest('tr').classList.remove('is-disabled');
+          });
+          renderRows();
+          renderConfig();
+          renderSummary();
+          updateTimers();
+        });
+      }
+
+      // Copy handlers
+      function copyTextOf(elId, btn) {
+        var el = document.getElementById(elId);
+        if (!el) return;
+        var text = el.textContent;
+        var done = function () {
+          var prev = btn.textContent;
+          btn.textContent = '✓ copied';
+          btn.classList.add('live-config__copy--ok');
+          btn.classList.add('summary__btn--ok');
+          setTimeout(function () {
+            btn.textContent = prev;
+            btn.classList.remove('live-config__copy--ok');
+            btn.classList.remove('summary__btn--ok');
+          }, 1800);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+        } else { fallbackCopy(text); done(); }
+      }
+      function fallbackCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'absolute'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+
+      // Reset countdown timers
+      function pad(n) { return n < 10 ? '0' + n : '' + n; }
+      function updateTimers() {
+        var now = new Date();
+
+        // Daily — until next 00:00 UTC
+        var nextMid = new Date(Date.UTC(
+          now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0
+        ));
+        var dDiff = nextMid - now;
+        var dh = Math.floor(dDiff / 3600000);
+        var dm = Math.floor((dDiff % 3600000) / 60000);
+        var ds = Math.floor((dDiff % 60000) / 1000);
+        $('reset-daily').textContent = pad(dh) + 'h ' + pad(dm) + 'm ' + pad(ds) + 's';
+
+        // Weekly — until next selected weekday 00:00 UTC
+        var targetDow = parseInt(state.resetDay, 10); // 0=Sun .. 6=Sat
+        var dow = now.getUTCDay();
+        var daysAhead = (targetDow - dow + 7) % 7;
+        if (daysAhead === 0) daysAhead = 7;
+        var nextWeek = new Date(Date.UTC(
+          now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead, 0, 0, 0
+        ));
+        var wDiff = nextWeek - now;
+        var wd = Math.floor(wDiff / 86400000);
+        var wh = Math.floor((wDiff % 86400000) / 3600000);
+        var wm = Math.floor((wDiff % 3600000) / 60000);
+        $('reset-weekly').textContent = wd + 'd ' + pad(wh) + 'h ' + pad(wm) + 'm';
+        var dayNames = { '0': 'Sunday', '1': 'Monday', '6': 'Saturday' };
+        $('reset-weekly-sub').textContent = (dayNames[state.resetDay] || 'Monday') + ' 00:00 UTC';
+
+        // Update every CLI row's resetIn placeholder cell
+        var rText = wd + 'd ' + pad(wh) + 'h';
+        document.querySelectorAll('.resets-cell').forEach(function (n) { n.textContent = rText; });
+      }
+
+      // Init
+      renderRows();
+      paintSlider();
+      wireControls();
+      renderConfig();
+      renderSummary();
+      updateTimers();
+      setInterval(updateTimers, 1000);
+
+      $('copy-live-config').addEventListener('click', function (e) {
+        copyTextOf('live-config-body', e.currentTarget);
+      });
+      $('sum-copy').addEventListener('click', function (e) {
+        copyTextOf('live-config-body', e.currentTarget);
+      });
+    })();
+  </script>
+</section>
+
 <!-- ============ _skills.html ============ -->
 <!--
   code-quality-skills-kit — CLI compatibility matrix + 15 Skills overview
@@ -376,7 +932,6 @@
 -->
 <section class="skills-section" aria-labelledby="skills-heading">
   <style>
-    /* Scoped tokens — mirror hero palette */
     .skills-section {
       --bg: #0a0d12;
       --bg-elevated: #14181f;
@@ -402,7 +957,6 @@
       margin: 0 auto;
     }
 
-    /* Headings */
     .skills-section h2 {
       font-size: clamp(1.5rem, 3vw, 2rem);
       letter-spacing: -0.01em;
@@ -420,7 +974,6 @@
       max-width: 64ch;
     }
 
-    /* ─── Section 1 · CLI matrix ───────────────────────────────────── */
     .cli-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -495,7 +1048,6 @@
       opacity: 0.6;
     }
 
-    /* ─── Section 2 · 15 dimensions ───────────────────────────────── */
     .filter-bar {
       display: flex;
       flex-wrap: wrap;
@@ -598,7 +1150,6 @@
       letter-spacing: 0.02em;
       font-variant-numeric: tabular-nums;
     }
-    /* Weight bands */
     .skill-card .weight.w-hi   { color: var(--accent);  border-color: rgba(0,217,255,0.35); }
     .skill-card .weight.w-mid  { color: var(--fg);      border-color: var(--border); }
     .skill-card .weight.w-lo   { color: var(--muted);   border-color: var(--border); }
@@ -645,7 +1196,6 @@
       color: var(--muted);
     }
 
-    /* Caret indicator */
     .skill-card summary .caret {
       color: var(--muted);
       transition: transform 0.2s ease;
@@ -655,14 +1205,12 @@
     }
     .skill-card[open] summary .caret { transform: rotate(90deg); color: var(--accent); }
 
-    /* Mobile */
     @media (max-width: 480px) {
       .skills-section { padding: 2.5rem 0.85rem; }
       .cli-grid,
       .skills-grid { grid-template-columns: 1fr; }
     }
 
-    /* Reduced motion */
     @media (prefers-reduced-motion: reduce) {
       .skills-section *,
       .skills-section *::before,
@@ -674,71 +1222,12 @@
   </style>
 
   <div class="container">
-    <!-- ─── Section 1 ─────────────────────────────────────────── -->
     <header>
-      <h2 id="skills-heading"><span class="marker">$</span>Multi-CLI parallel dispatch</h2>
+      <h2 id="skills-heading"><span class="marker">$</span>15 Audit Dimensions</h2>
       <p class="lede">
-        Each CLI plays to its strengths. The kit auto-detects what is installed
-        and dispatches the 15 audit dimensions across them in parallel.
-      </p>
-    </header>
-
-    <div class="cli-grid" role="list">
-      <article class="cli-card" role="listitem" aria-label="Claude CLI">
-        <div class="head">
-          <span class="glyph" aria-hidden="true">◆</span>
-          <span class="name">Claude</span>
-        </div>
-        <p class="strength">Architecture · Security · Code Review</p>
-        <div class="skill-badges" aria-label="Assigned skills">
-          <span>d4</span><span>d6</span><span>d13</span>
-        </div>
-        <span class="status" aria-label="Detection status">Detect on install</span>
-      </article>
-
-      <article class="cli-card" role="listitem" aria-label="Gemini CLI">
-        <div class="head">
-          <span class="glyph" aria-hidden="true">✦</span>
-          <span class="name">Gemini</span>
-        </div>
-        <p class="strength">Large-context · Deps · Docs</p>
-        <div class="skill-badges" aria-label="Assigned skills">
-          <span>d12</span><span>d8</span><span>d9</span>
-        </div>
-        <span class="status" aria-label="Detection status">Detect on install</span>
-      </article>
-
-      <article class="cli-card" role="listitem" aria-label="OpenCode CLI">
-        <div class="head">
-          <span class="glyph" aria-hidden="true">▣</span>
-          <span class="name">OpenCode</span>
-        </div>
-        <p class="strength">Bulk grep · Fast iteration</p>
-        <div class="skill-badges" aria-label="Assigned skills">
-          <span>d1</span><span>d3</span><span>d11</span><span>d14</span><span>d15</span>
-        </div>
-        <span class="status" aria-label="Detection status">Detect on install</span>
-      </article>
-
-      <article class="cli-card" role="listitem" aria-label="Codex CLI">
-        <div class="head">
-          <span class="glyph" aria-hidden="true">◈</span>
-          <span class="name">Codex</span>
-        </div>
-        <p class="strength">Types · Tests · Performance</p>
-        <div class="skill-badges" aria-label="Assigned skills">
-          <span>d2</span><span>d5</span><span>d7</span><span>d10</span>
-        </div>
-        <span class="status" aria-label="Detection status">Detect on install</span>
-      </article>
-    </div>
-
-    <!-- ─── Section 2 ─────────────────────────────────────────── -->
-    <header>
-      <h2><span class="marker">$</span>15 Audit Dimensions</h2>
-      <p class="lede">
-        Click any dimension to expand its checks. Filter by audit phase to
-        focus on what matters this iteration.
+        Each CLI plays to its strengths and the dispatcher above fans the
+        15 dimensions out in parallel. Click any dimension to expand its
+        checks. Filter by audit phase to focus on what matters this iteration.
       </p>
     </header>
 
@@ -1151,9 +1640,6 @@
       font-weight: 500; opacity: 0.85;
     }
 
-    /* ========================================================== */
-    /* Subsection A: Install tabs                                  */
-    /* ========================================================== */
     .install-tabs { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
     .install-tabs__radio { position: absolute; opacity: 0; pointer-events: none; }
     .install-tabs__nav { display: flex; border-bottom: 1px solid var(--border); background: var(--bg-deep); flex-wrap: wrap; }
@@ -1202,9 +1688,6 @@
     .copy-btn:active { transform: translateY(1px); }
     .copy-btn--ok { color: var(--success); border-color: var(--success); }
 
-    /* ========================================================== */
-    /* Subsection B: Configure form                                */
-    /* ========================================================== */
     .config-grid {
       display: grid; gap: 1.5rem;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1298,9 +1781,6 @@
     .config-preview__body .yv { color: var(--success); }
     .config-preview__body .yc { color: var(--muted); }
 
-    /* ========================================================== */
-    /* Subsection C: Live demo terminal                            */
-    /* ========================================================== */
     .terminal {
       position: relative; background: var(--bg-deep); border: 1px solid var(--border);
       border-radius: 10px; box-shadow: 0 20px 60px -20px rgba(0, 217, 255, 0.15), 0 0 0 1px var(--border-soft);
@@ -1367,7 +1847,6 @@
     .score-block--g { color: var(--success); border-color: var(--success); background: rgba(74, 222, 128, 0.06); }
     .score-block--c { color: var(--accent); border-color: var(--accent); background: rgba(0, 217, 255, 0.06); }
 
-    /* Cursor for "typing" line */
     .cursor::after {
       content: '▌'; display: inline-block; margin-left: 0.15rem; color: var(--accent);
       animation: blink 1s steps(2) infinite;
@@ -1383,9 +1862,7 @@
     </p>
   </header>
 
-  <!-- ============================================================ -->
   <!-- Subsection A: Install (3 ways)                                -->
-  <!-- ============================================================ -->
   <div class="demo__section" id="install">
     <h3 class="demo__section-title">
       <span>Install</span>
@@ -1429,9 +1906,7 @@
     </div>
   </div>
 
-  <!-- ============================================================ -->
   <!-- Subsection B: Configure (4 questions)                         -->
-  <!-- ============================================================ -->
   <div class="demo__section" id="configure">
     <h3 class="demo__section-title">
       <span>Configure</span>
@@ -1520,9 +1995,7 @@
     </div>
   </div>
 
-  <!-- ============================================================ -->
   <!-- Subsection C: Live demo                                       -->
-  <!-- ============================================================ -->
   <div class="demo__section" id="live-demo">
     <h3 class="demo__section-title">
       <span>Live Demo</span>
@@ -1626,17 +2099,15 @@
         { t: 'prompt', txt: '$ cd ./my-nextjs-app' },
         { t: 'prompt', txt: '$ /code-quality-checker' },
         { t: 'gap' },
-        { t: 'dim',  txt: '  ┌──────────────────────────────────────────────────────────────────────┐' },
-        { t: 'accent', txt: '  │     ░█▀▀░░█▀█░░█▀█       Code Quality Skills Kit  ·  v3.6           │' },
-        { t: 'accent', txt: '  │     ░█░░░░█░█░░█░█       ────────────────────────────────────       │' },
-        { t: 'accent', txt: '  │     ░▀▀▀░░▀▀▀░░▀▀▀       Multi-CLI · 15 dimensions · 99% coverage   │' },
-        { t: 'dim',  txt: '  └──────────────────────────────────────────────────────────────────────┘' },
+        { t: 'accent', txt: '  ┌─ Code Quality Skills Kit · v3.6 ─────────────────────────────────────┐' },
+        { t: 'accent', txt: '  │  Multi-CLI · 15 dimensions · 99% coverage · Critical-Cap scoring      │' },
+        { t: 'accent', txt: '  └───────────────────────────────────────────────────────────────────────┘' },
         { t: 'gap' },
         { t: 'dim',  txt: '  ┌─ CLI Agents · live status @ 2026-05-01 22:42 ──────────────────┐' },
-        { t: 'plain', txt: '  │  <span class="terminal__line--ok">claude   ●</span>  2.1.126  ✓ latest  max     martiking@... $46/d    │' },
-        { t: 'plain', txt: '  │  <span class="terminal__line--ok">gemini   ●</span>  0.40.1   ✓ latest  free    martiking@... n/a      │' },
-        { t: 'plain', txt: '  │  <span class="terminal__line--warn">opencode ◐</span>  1.14.29  ↑ 1.14.31 local   nvidia/glm   3 evts    │' },
-        { t: 'plain', txt: '  │  <span class="terminal__line--ok">codex    ●</span>  0.125.0  ↑ 0.128.0 chatgpt 46a93fbd...  5 evts    │' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--ok">claude   ●</span>  2.1.126  ✓ latest  max     u***@e***.com  $46/d   │' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--ok">gemini   ●</span>  0.40.1   ✓ latest  free    u***@e***.com  n/a     │' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--warn">opencode ◐</span>  1.14.29  ↑ 1.14.31 local   local-model    3 evts   │' },
+        { t: 'plain', txt: '  │  <span class="terminal__line--ok">codex    ●</span>  0.125.0  ↑ 0.128.0 api     ****-token    5 evts   │' },
         { t: 'dim',  txt: '  └────────────────────────────────────────────────────────────────┘' },
         { t: 'gap' },
         { t: 'plain', txt: '  📋 Audit plan ready · <span class="terminal__line--accent">13 skills active</span> · 2 skipped (d10, d14)' },
@@ -1728,7 +2199,6 @@
     })();
   </script>
 </section>
-
 
 <footer style="padding: 48px 24px; border-top: 1px solid var(--border); color: var(--muted); text-align: center; font-size: 13px; max-width: 1200px; margin: 80px auto 0;">
   <p style="margin: 0 0 8px;">Built with multi-agent parallel sub-agents — eating our own dog food.</p>
