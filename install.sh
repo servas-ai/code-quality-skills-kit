@@ -27,7 +27,8 @@ mkdir -p "$DEST"
 cp "$TMP/kit/bin/cqc" "$DEST/cqc"
 cp "$TMP/kit/bin/cqc-budget" "$DEST/cqc-budget"
 cp "$TMP/kit/bin/cqc-ui" "$DEST/cqc-ui"
-chmod +x "$DEST/cqc" "$DEST/cqc-budget" "$DEST/cqc-ui"
+cp "$TMP/kit/bin/cqc-parallel" "$DEST/cqc-parallel"
+chmod +x "$DEST/cqc" "$DEST/cqc-budget" "$DEST/cqc-ui" "$DEST/cqc-parallel"
 echo "🔧 Installed: cqc + cqc-budget + cqc-ui → $DEST/"
 
 # Register /cqc slash command for Claude Code
