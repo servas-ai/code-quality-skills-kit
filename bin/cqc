@@ -46,6 +46,66 @@ default_model() {
   esac
 }
 
+# ─── Fallback chain per CLI (when primary model is rate-limited) ──
+# Returns space-separated list. Ordered: primary → secondary → tertiary
+fallback_chain() {
+  case "$1" in
+    gemini)   echo "gemini-3.1-pro-preview gemini-3-pro gemini-2.5-flash gemini-2.0-flash" ;;
+    claude)   echo "claude-opus-4-7 claude-sonnet-4-6 claude-haiku-4-5" ;;
+    codex)    echo "gpt-5.4 gpt-5.2-codex" ;;
+    opencode) echo "glm-4.6 kimi-k2.5 minimax-m2.5" ;;
+    *)        echo "default" ;;
+  esac
+}
+
+# ─── Run gemini with auto-fallback when quota hit ─────────────────
+# Detects rate-limit signals (429, "quota", "RESOURCE_EXHAUSTED")
+# and retries the same prompt with the next model in the chain.
+run_gemini_with_fallback() {
+  local prompt="$1"
+  local yolo_flag="$2"  # "" or "--yolo"
+  local chain
+  chain=$(fallback_chain gemini)
+
+  for model in $chain; do
+    echo "${C_DIM}  ▸ Trying gemini -m $model${C_RST}" >&2
+    local tmperr
+    tmperr=$(mktemp)
+    local out
+    if [ "$yolo_flag" = "--yolo" ]; then
+      out=$(gemini --yolo -m "$model" -p "$prompt" 2>"$tmperr")
+    else
+      out=$(gemini -m "$model" -p "$prompt" 2>"$tmperr")
+    fi
+    local exit_code=$?
+    local stderr_text
+    stderr_text=$(cat "$tmperr")
+    rm -f "$tmperr"
+
+    # Detect rate-limit / quota signals
+    if echo "$stderr_text$out" | grep -qiE "status[: ]+429|too many requests|RESOURCE_EXHAUSTED|quota.*exceed|rate.*limit"; then
+      echo "${C_AMBER}  ⚠ $model hit quota limit — falling back to next model…${C_RST}" >&2
+      continue
+    fi
+
+    # Success
+    if [ "$exit_code" -eq 0 ] && [ -n "$out" ]; then
+      echo "${C_GREEN}  ✓ Used: $model${C_RST}" >&2
+      echo "$out"
+      return 0
+    fi
+
+    # Other non-quota error — retry next model anyway (Pro might be down)
+    if [ "$exit_code" -ne 0 ]; then
+      echo "${C_AMBER}  ⚠ $model exit=$exit_code — trying next model…${C_RST}" >&2
+      continue
+    fi
+  done
+
+  echo "${C_RED}❌ All gemini models in fallback chain exhausted${C_RST}" >&2
+  return 1
+}
+
 # ─── Seed defaults.yaml on first run ──────────────────────────────
 seed_defaults() {
   if [ ! -f "$DEFAULTS" ]; then
@@ -63,6 +123,17 @@ best:
   gemini:   $(default_model gemini)
   opencode: $(default_model opencode)
   codex:    $(default_model codex)
+
+# Fallback chains — when primary model hits quota/429, cqc auto-switches.
+# Order: tried left-to-right. First success wins.
+fallback:
+  gemini:   [gemini-3.1-pro-preview, gemini-3-pro, gemini-2.5-flash, gemini-2.0-flash]
+  claude:   [claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5]
+  codex:    [gpt-5.4, gpt-5.2-codex]
+  opencode: [glm-4.6, kimi-k2.5, minimax-m2.5]
+
+# Detection patterns for quota-hit (regex, OR-joined)
+quota_signals: "status[: ]+429|too many requests|RESOURCE_EXHAUSTED|quota.*exceed|rate.*limit"
 
 # YOLO mode: skip all confirmations + onboarding
 yolo: false
@@ -162,11 +233,14 @@ cmd_run() {
         echo "   Install: ${C_CYAN}npm i -g @google/gemini-cli${C_RST}"; exit 1
       fi
       local PROMPT="Read code-quality-checker.md in this directory. Execute Phase 0 through Phase 5 against the current repo. Use ALL 15 audit dimensions in parallel where possible. Skip the 4 onboarding questions (use --yes mode defaults). Write results to audit-reports/<run-id>/. Output the final compact summary."
+
+      # Auto-fallback chain: pro-preview → pro → flash (when quota hit)
+      echo "${C_BOLD}▸ Gemini auto-fallback chain:${C_RST} $(fallback_chain gemini | tr ' ' '\n' | sed 's/^/    /')"
       if [ "$yolo" = "true" ]; then
-        echo "${C_AMBER}🚀 YOLO mode: gemini --yolo with $model${C_RST}"
-        gemini --yolo -m "$model" -p "$PROMPT"
+        echo "${C_AMBER}🚀 YOLO mode active${C_RST}"
+        run_gemini_with_fallback "$PROMPT" "--yolo"
       else
-        gemini -m "$model" -p "$PROMPT"
+        run_gemini_with_fallback "$PROMPT" ""
       fi
       ;;
     claude)
