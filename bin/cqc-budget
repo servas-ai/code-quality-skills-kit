@@ -212,7 +212,7 @@ for cli in claude gemini opencode codex; do
   [ -z "${CLIS[$cli]:-}" ] && continue
   CUR="${WEEK_PCT[$cli]:-0}"
   printf "  ${C_CYAN}%-9s${C_RST} (current %3d%%) → max %% for this run [75]: " "$cli" "$CUR"
-  read -r INPUT < /dev/tty || INPUT=""
+  if [ -e /dev/tty ]; then read -r INPUT < /dev/tty || INPUT=""; else read -r INPUT || INPUT=""; fi
   INPUT="${INPUT:-75}"
   if ! [[ "$INPUT" =~ ^[0-9]+$ ]] || [ "$INPUT" -lt 0 ] || [ "$INPUT" -gt 100 ]; then
     echo "    ${C_RED}invalid (must be 0-100), using 75${C_RST}"
