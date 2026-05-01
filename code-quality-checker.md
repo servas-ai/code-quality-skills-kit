@@ -210,90 +210,163 @@ Same atomic-RW protocol.
 
 ---
 
-# Phase -1 — ASCII Banner + CLI Usage Dashboard (FIRST output)
+# Phase -1 — Banner + CLI Status Dashboard (FIRST output)
 
-**Before any other phase**, print this ASCII banner + a CLI-usage table. This is the user's first contact with the run, so it must be:
-1. Visually clear (ASCII art for character)
-2. Informative (which CLIs are available, how much budget left)
-3. Fast (≤2 s — no network calls beyond cached usage tools)
+**Before any other phase**, print this banner + a detailed CLI-status table. This is the user's first contact with the run.
 
 ## Banner
 
 ```
-   ╭──────────────────────────────────────────────────────────────────╮
-   │                                                                  │
-   │   ██████╗ ██████╗  ██████╗      Multi-Agent Code Quality         │
-   │  ██╔════╝██╔═══██╗██╔════╝      Audit Kit · v3.5                 │
-   │  ██║     ██║   ██║██║           ─────────────────────────────    │
-   │  ██║     ██║▄▄ ██║██║           One prompt · Any codebase        │
-   │  ╚██████╗╚██████╔╝╚██████╗      15 dimensions · parallel CLIs    │
-   │   ╚═════╝ ╚══▀▀═╝  ╚═════╝      Critical-Cap · 99% coverage      │
-   │                                                                  │
-   ╰──────────────────────────────────────────────────────────────────╯
-
-   github.com/servas-ai/code-quality-skills-kit · MIT
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │                                                                      │
+  │     ░█▀▀░░█▀█░░█▀█       Code Quality Skills Kit  ·  v3.6           │
+  │     ░█░░░░█░█░░█░█       ────────────────────────────────────       │
+  │     ░▀▀▀░░▀▀▀░░▀▀▀       Multi-CLI · 15 dimensions · 99% coverage   │
+  │                          Critical-Cap scoring · token-optimised      │
+  │                                                                      │
+  │     ▸ One prompt · Any codebase · Parallel sub-agents                │
+  │     ▸ github.com/servas-ai/code-quality-skills-kit  ·  MIT           │
+  │                                                                      │
+  └──────────────────────────────────────────────────────────────────────┘
 ```
 
-## CLI usage dashboard (probed live, ≤2 s)
+## Detailed CLI status table (probed live, parallel, ≤3 s)
 
-For each detected CLI, probe its usage and render a compact bar chart. **Cache results in `~/.cache/cqc-cli-usage.json`** (10-min TTL) to avoid repeated probes.
+Probe **all 4 CLIs in parallel** (background jobs, `wait` to collect). Each probe collects 6 data points:
 
-### Probe commands per CLI
+| Field | Source | Fallback |
+|-------|--------|----------|
+| `version` | `<cli> --version` | `?` |
+| `latest_version` | `npm view <pkg> version` (cached 24 h in `~/.cache/cqc-versions.json`) | offline → skip |
+| `update_status` | compare semver | `up-to-date` / `update available` |
+| `plan` | per-CLI auth file | `unknown` |
+| `account` | per-CLI auth file (email / id, redacted to ≤30 chars) | `n/a` |
+| `usage_today` / `usage_week` | per-CLI usage probe | `n/a` |
+| `last_used` | per-CLI history file | `n/a` |
+| `default_model` | per-CLI config | `default` |
+
+### Probe commands (all run in parallel, in `&` background)
 
 ```bash
-# claude (via ccusage — install on demand if missing)
-WEEK=$(npx --yes -q ccusage@latest weekly --json 2>/dev/null \
-  | jq -r '.weekly[-1] | "\(.totalTokens) \(.totalCost)"' 2>/dev/null \
-  || echo "0 0")
-DAY=$(npx --yes -q ccusage@latest daily --json 2>/dev/null \
-  | jq -r '.daily[-1] | "\(.totalTokens) \(.totalCost)"' 2>/dev/null \
-  || echo "0 0")
+# claude (Anthropic Claude Code)
+( CL_VER=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  CL_LATEST=$(npm view @anthropic-ai/claude-code version 2>/dev/null)
+  CL_PLAN=$(jq -r '.subscription_type // .plan // "api"' ~/.claude/auth.json 2>/dev/null || echo api)
+  CL_ACCT=$(jq -r '.email // .account_id // "n/a"' ~/.claude/auth.json 2>/dev/null | cut -c1-30)
+  CL_MODEL=$(jq -r '.model // "default (sonnet)"' ~/.claude/settings.json 2>/dev/null)
+  CL_USAGE=$(npx --yes -q ccusage@latest daily --json 2>/dev/null \
+    | jq -r '.daily[-1] | "\(.totalCost // 0) \(.totalTokens // 0)"' 2>/dev/null || echo "0 0")
+  CL_WEEK=$(npx --yes -q ccusage@latest weekly --json 2>/dev/null \
+    | jq -r '.weekly[-1] | "\(.totalCost // 0) \(.totalTokens // 0)"' 2>/dev/null || echo "0 0")
+  CL_LAST=$(stat -c '%Y' ~/.claude/history.jsonl 2>/dev/null || echo 0)
+  echo "claude|$CL_VER|$CL_LATEST|$CL_PLAN|$CL_ACCT|$CL_MODEL|$CL_USAGE|$CL_WEEK|$CL_LAST"
+) &
 
-# gemini (Code Assist via state.json — quota lookup not yet exposed; show "n/a")
-GEMINI_DAY="n/a"
+# gemini (Google Gemini CLI)
+( G_VER=$(gemini --version 2>/dev/null | head -1)
+  G_LATEST=$(npm view @google/gemini-cli version 2>/dev/null)
+  G_ACCT=$(jq -r '.active // "n/a"' ~/.gemini/google_accounts.json 2>/dev/null | cut -c1-30)
+  G_PROJ=$(jq -r '.[].project_id // "no-project"' ~/.gemini/projects.json 2>/dev/null | head -1)
+  G_LAST=$(stat -c '%Y' ~/.gemini/state.json 2>/dev/null || echo 0)
+  echo "gemini|$G_VER|$G_LATEST|free|$G_ACCT|gemini-3-pro|0 0|0 0|$G_LAST|proj:$G_PROJ"
+) &
 
-# opencode (stats command, requires authenticated session)
-OC_DAY=$(timeout 5 opencode stats --json 2>/dev/null | jq -r '.daily // "n/a"' 2>/dev/null || echo "n/a")
+# opencode
+( OC_VER=$(opencode --version 2>/dev/null | head -1)
+  OC_LATEST=$(npm view opencode-ai version 2>/dev/null)
+  OC_PROVIDER=$(jq -r '. | keys[0]' ~/.config/opencode/opencode.json 2>/dev/null || echo "default")
+  OC_MODEL=$(jq -r '.[keys[0]].models | keys[0]' ~/.config/opencode/opencode.json 2>/dev/null || echo "n/a")
+  OC_LAST=$(stat -c '%Y' ~/.config/opencode/opencode.json 2>/dev/null || echo 0)
+  echo "opencode|$OC_VER|$OC_LATEST|local|$OC_PROVIDER|$OC_MODEL|0 0|0 0|$OC_LAST"
+) &
 
-# codex (history.jsonl event count from last 7 d, 24 h)
-CODEX_WEEK=$(jq -r --argjson c "$(date -d '7 days ago' +%s)" \
-  'select(.ts > $c)' ~/.codex/history.jsonl 2>/dev/null | jq -s 'length')
-CODEX_DAY=$(jq -r --argjson c "$(date -d '24 hours ago' +%s)" \
-  'select(.ts > $c)' ~/.codex/history.jsonl 2>/dev/null | jq -s 'length')
+# codex (OpenAI Codex CLI)
+( CX_VER=$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  CX_LATEST=$(npm view @openai/codex version 2>/dev/null)
+  CX_MODE=$(jq -r '.auth_mode // "chatgpt"' ~/.codex/auth.json 2>/dev/null)
+  CX_ACCT=$(jq -r '.tokens.account_id // .tokens.accountId // "n/a"' ~/.codex/auth.json 2>/dev/null | cut -c1-30)
+  CX_DAY=$(jq -s --argjson c "$(date -d '24 hours ago' +%s 2>/dev/null || date -v-1d +%s)" \
+    '[.[] | select(.ts > $c)] | length' ~/.codex/history.jsonl 2>/dev/null || echo 0)
+  CX_WEEK=$(jq -s --argjson c "$(date -d '7 days ago' +%s 2>/dev/null || date -v-7d +%s)" \
+    '[.[] | select(.ts > $c)] | length' ~/.codex/history.jsonl 2>/dev/null || echo 0)
+  CX_LAST=$(jq -s 'sort_by(.ts) | last.ts // 0' ~/.codex/history.jsonl 2>/dev/null || echo 0)
+  echo "codex|$CX_VER|$CX_LATEST|$CX_MODE|$CX_ACCT|gpt-5.x|0 $CX_DAY|0 $CX_WEEK|$CX_LAST"
+) &
+
+wait
 ```
 
-### Rendered output
+### Rendered output (real example)
 
 ```
-   CLI Agents · usage rollup (probed @ 2026-05-01 22:42)
-   ──────────────────────────────────────────────────────────────────
-   ✅ claude    v2.1.126  ████████████░░░░░░  $46.02 today · $52.71 week · plan: api
-   ✅ gemini    v0.40.1   ░░░░░░░░░░░░░░░░░░  no quota API · OAuth flow active
-   ✅ opencode  v1.14.29  ███░░░░░░░░░░░░░░░  127 evts today · auth: pro
-   ✅ codex     v0.125.0  █░░░░░░░░░░░░░░░░░    5 evts week  · auth: chatgpt
-   ──────────────────────────────────────────────────────────────────
-   Mode: multi-cli (4 detected) · Skills will fan out across all 4
+  ┌─ CLI Agents · live status @ 2026-05-01 22:42 ──────────────────────────────────────┐
+  │                                                                                    │
+  │  Agent       Version    Update    Plan    Account                  Today    Week   │
+  │  ─────────────────────────────────────────────────────────────────────────────────  │
+  │  claude   ●  2.1.126    ✓ latest  max     martiking1000@gmail.com  $46.02   $1866  │
+  │             model: claude-opus-4-7    last used: 2 min ago         11.4M tk  335M  │
+  │                                                                                    │
+  │  gemini   ●  0.40.1     ✓ latest  free    martiking1000@gmail.com  n/a      n/a    │
+  │             model: gemini-3-pro       last used: 14 d ago          quota:OAuth     │
+  │                                                                                    │
+  │  opencode ◐  1.14.29    ↑ 1.14.31 local   nvidia/glm-5.1           3 evts   3 evts │
+  │             provider: opencode-go     last used: 3 d ago           model: glm-5.1  │
+  │                                                                                    │
+  │  codex    ●  0.125.0    ↑ 0.128.0 chatgpt 46a93fbd-59d8-401d-8d90  0 evts   5 evts │
+  │             model: gpt-5.x           last used: 6 h ago            (history.jsonl) │
+  │                                                                                    │
+  │  ─────────────────────────────────────────────────────────────────────────────────  │
+  │  Detected: 4 / 4   ·   Updates: 2 available   ·   Total cost today: $46.02         │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+
+  Dispatch plan (multi-CLI fan-out):
+    claude   → d4 d6 d13       (architecture, security, cache)
+    gemini   → d12 d8 d9        (deps, dead-code, docs — large context)
+    opencode → d1 d3 d11 d14 d15 (bulk grep)
+    codex    → d2 d5 d7 d10     (types, perf, a11y, ci)
 ```
 
-Bar formula: `bar_width = min(18, round(usage / max_observed × 18))`. Solid blocks `█` for used, light blocks `░` for remaining.
+### Status legend
+
+- `●` healthy + recently used (last_used < 7 days)
+- `◐` healthy but stale (last_used 7–30 days)
+- `○` healthy but never used here (last_used > 30 days or unknown)
+- `◯` detected but auth missing/broken
+- `✗` not installed
+- `✓ latest` — running the newest published version
+- `↑ <ver>` — update available; show target version
+
+### Update notifier
+
+If any CLI shows `↑`, print a one-line summary AFTER the table:
+
+```
+  ▸ Updates available: opencode 1.14.29 → 1.14.31, codex 0.125.0 → 0.128.0
+    Run: npm i -g opencode-ai @openai/codex
+```
+
+This is informational only — never auto-update; never block the audit.
+
+### Quota warnings (after the table)
+
+```
+  ⚠ claude weekly cost $1866 exceeds default $200 cap — confirm plan tier in cqc.config.yaml
+  ⚠ codex usage at 92 % of daily limit — will redistribute to opencode for d2/d5
+```
+
+When a quota is exceeded, **redistribute that CLI's skills** to the next-best CLI in the dispatch matrix (Phase 0.8).
 
 ### Rendering rules
 
-- **Width: 70 chars** (fits in any terminal)
-- **No colour** when stdout is not a TTY (CI mode auto-detected)
-- **Skip the banner with `--quiet`** for scripted use; still print 1-line CLI summary
-- **Skip on resume** (re-run of same RUN_ID) — banner only on cold start
-
-## Quota warnings
-
-If any CLI shows >80 % of plan limit, print a yellow warning before dispatch:
-
-```
-   ⚠️  claude usage at 87 % of weekly $200 cap — consider --no-tools to save tokens
-   ⚠️  codex usage at 92 % of daily limit — will fan out to opencode/gemini for codex skills
-```
-
-When a quota is exceeded, **redistribute that CLI's skills** to the next-best CLI in the dispatch matrix.
+- **Width: 88 chars** (fits standard 100-col terminal)
+- **No colour** when stdout is not a TTY (CI mode auto-detected via `[ -t 1 ]`)
+- **Skip the banner with `--quiet`** for scripted use; print only the dispatch plan one-liner
+- **Skip on resume** (same RUN_ID exists) — banner only on cold start
+- **Cache `npm view` results** in `~/.cache/cqc-versions.json` (24 h TTL) to avoid 4 npm round-trips on every run
+- **Account-ID redaction**: emails kept as-is (already user's own); UUIDs/account-ids truncated to first 30 chars + "…"
+- **Cost rounding**: <$1 shown as `$0.04` (2 decimals); ≥$1 shown as `$46.02`; ≥$100 shown as `$1866` (no decimals)
+- **Token rounding**: <1k as raw (`847 tk`); <1M as `K` (`46.5K tk`); ≥1M as `M` (`11.4M tk`); ≥1G as `B` (`1.2B tk`)
+- **Time-since-last-used**: `2 min ago` / `6 h ago` / `3 d ago` / `2 wk ago` (not raw timestamps)
 
 ---
 
