@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# cqc — single entry-point CLI for code-quality-skills-kit
+# https://github.com/servas-ai/code-quality-skills-kit
+#
+# Usage:
+#   cqc                      # auto-mode (uses defaults from ~/.cqc/defaults.yaml)
+#   cqc init                 # install kit into current repo
+#   cqc budget               # interactive %-threshold setter (alias for cqc-budget)
+#   cqc run                  # run audit (calls /code-quality-checker via configured CLI)
+#   cqc set-default <key>=<value>   # update ~/.cqc/defaults.yaml
+#   cqc status               # show CLI usage + reset times
+#   cqc --yolo               # YOLO mode: skip all prompts, run with defaults
+#
+# Flags:
+#   --yolo                   skip all confirmations
+#   --gemini-only            use only Gemini CLI (with Gemini 3.1 Pro Preview)
+#   --claude-only / --codex-only / --opencode-only
+#   --model=<name>           override model (e.g. --model=gemini-3.1-pro-preview)
+#   --best                   force best available model per CLI (default)
+
+set -euo pipefail
+umask 077
+
+# ─── Paths ────────────────────────────────────────────────────────
+CQC_HOME="${CQC_HOME:-$HOME/.cqc}"
+DEFAULTS="$CQC_HOME/defaults.yaml"
+mkdir -p "$CQC_HOME"
+
+# ─── Colors ───────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_AMBER=$'\033[33m'; C_RED=$'\033[31m'
+  C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RST=$'\033[0m'
+else
+  C_CYAN=""; C_GREEN=""; C_AMBER=""; C_RED=""; C_BOLD=""; C_DIM=""; C_RST=""
+fi
+
+# ─── Best-model defaults per CLI ──────────────────────────────────
+# Updated 2026-05 — refresh via `cqc set-default best.<cli>=<model>`
+default_model() {
+  case "$1" in
+    claude)   echo "claude-opus-4-7" ;;
+    gemini)   echo "gemini-3.1-pro-preview" ;;
+    opencode) echo "glm-4.6" ;;
+    codex)    echo "gpt-5.4" ;;
+    *)        echo "default" ;;
+  esac
+}
+
+# ─── Seed defaults.yaml on first run ──────────────────────────────
+seed_defaults() {
+  if [ ! -f "$DEFAULTS" ]; then
+    cat > "$DEFAULTS" <<EOF
+# ~/.cqc/defaults.yaml — global defaults for cqc
+# Edit by hand or via: cqc set-default <key>=<value>
+
+# Default CLI to use (claude | gemini | opencode | codex | auto)
+# 'auto' = use all detected CLIs in parallel
+default_cli: gemini
+
+# Best model per CLI (auto-applied when --best or default)
+best:
+  claude:   $(default_model claude)
+  gemini:   $(default_model gemini)
+  opencode: $(default_model opencode)
+  codex:    $(default_model codex)
+
+# YOLO mode: skip all confirmations + onboarding
+yolo: false
+
+# Default budget threshold (% of weekly quota per CLI)
+default_threshold: 75
+
+# Auto-confirm danger-y operations during audit
+auto_confirm: false
+EOF
+    echo "${C_DIM}✓ seeded $DEFAULTS${C_RST}" >&2
+  fi
+}
+
+read_default() {
+  local key="$1"
+  grep -E "^${key}:" "$DEFAULTS" 2>/dev/null | head -1 | awk -F': ' '{print $2}' | tr -d '"'
+}
+
+# ─── Banner ───────────────────────────────────────────────────────
+banner() {
+  cat <<EOF
+${C_CYAN}╭─────────────────────────────────────────────────────────────╮
+│  ${C_BOLD}cqc${C_RST}${C_CYAN} · code-quality audit · servas-ai/code-quality-skills-kit │
+╰─────────────────────────────────────────────────────────────╯${C_RST}
+
+EOF
+}
+
+# ─── Subcommands ──────────────────────────────────────────────────
+cmd_init() {
+  if [ ! -d .git ]; then
+    echo "${C_RED}❌ Not a git repo. Run 'git init' first.${C_RST}"; exit 1
+  fi
+  if [ -f code-quality-checker.md ] && [ "${1:-}" != "--force" ]; then
+    echo "${C_AMBER}⚠ Already installed. Use 'cqc init --force' to refresh.${C_RST}"
+    return 0
+  fi
+  echo "${C_BOLD}▸ Installing kit…${C_RST}"
+  TMP=$(mktemp -d) && trap "rm -rf $TMP" EXIT
+  git clone --depth 1 --quiet https://github.com/servas-ai/code-quality-skills-kit "$TMP/kit"
+  cp "$TMP/kit/code-quality-checker.md" .
+  cp -r "$TMP/kit/code-quality-skills" .
+  if ! grep -q "^audit-reports/$" .gitignore 2>/dev/null; then
+    echo "audit-reports/" >> .gitignore
+    echo "${C_DIM}  + audit-reports/ → .gitignore${C_RST}"
+  fi
+  # Also install /cqc slash command for Claude Code
+  if [ -d "$HOME/.claude/commands" ]; then
+    cp "$TMP/kit/code-quality-checker.md" "$HOME/.claude/commands/cqc.md"
+    echo "${C_DIM}  + /cqc registered for Claude Code${C_RST}"
+  fi
+  echo "${C_GREEN}✓ Kit ready in $(pwd)${C_RST}"
+}
+
+cmd_status() {
+  if [ -x "$(command -v cqc-budget)" ]; then
+    cqc-budget --status-only 2>/dev/null || cqc-budget < /dev/null 2>&1 | head -25
+  else
+    echo "${C_AMBER}cqc-budget not found. Run: cqc init${C_RST}"
+  fi
+}
+
+cmd_set_default() {
+  local kv="$1"
+  local key="${kv%=*}"
+  local val="${kv#*=}"
+  if grep -qE "^${key}:" "$DEFAULTS"; then
+    sed -i.bak -E "s|^${key}:.*|${key}: ${val}|" "$DEFAULTS" && rm -f "${DEFAULTS}.bak"
+  else
+    echo "${key}: ${val}" >> "$DEFAULTS"
+  fi
+  echo "${C_GREEN}✓ ${key} = ${val}${C_RST}"
+}
+
+cmd_run() {
+  local cli="${1:-$(read_default default_cli)}"
+  local model="${2:-$(default_model $cli)}"
+  local yolo="${YOLO:-false}"
+
+  if [ ! -f code-quality-checker.md ]; then
+    echo "${C_AMBER}⚠ Kit not installed in this repo. Running 'cqc init' first…${C_RST}"
+    cmd_init
+  fi
+
+  echo ""
+  echo "${C_BOLD}▸ Running audit${C_RST}"
+  printf "  CLI:   ${C_CYAN}%s${C_RST}\n" "$cli"
+  printf "  Model: ${C_CYAN}%s${C_RST}\n" "$model"
+  printf "  YOLO:  %s\n" "$yolo"
+  echo ""
+
+  case "$cli" in
+    gemini)
+      if ! command -v gemini >/dev/null; then
+        echo "${C_RED}❌ gemini CLI not installed.${C_RST}"
+        echo "   Install: ${C_CYAN}npm i -g @google/gemini-cli${C_RST}"; exit 1
+      fi
+      local PROMPT="Read code-quality-checker.md in this directory. Execute Phase 0 through Phase 5 against the current repo. Use ALL 15 audit dimensions in parallel where possible. Skip the 4 onboarding questions (use --yes mode defaults). Write results to audit-reports/<run-id>/. Output the final compact summary."
+      if [ "$yolo" = "true" ]; then
+        echo "${C_AMBER}🚀 YOLO mode: gemini --yolo with $model${C_RST}"
+        gemini --yolo -m "$model" -p "$PROMPT"
+      else
+        gemini -m "$model" -p "$PROMPT"
+      fi
+      ;;
+    claude)
+      if ! command -v claude >/dev/null; then
+        echo "${C_RED}❌ claude CLI not installed.${C_RST}"; exit 1
+      fi
+      claude --print --model "$model" "/cqc"
+      ;;
+    codex)
+      command -v codex >/dev/null || { echo "${C_RED}❌ codex not installed${C_RST}"; exit 1; }
+      codex exec --model "$model" "Read and execute code-quality-checker.md against this repo"
+      ;;
+    opencode)
+      command -v opencode >/dev/null || { echo "${C_RED}❌ opencode not installed${C_RST}"; exit 1; }
+      opencode run --model "$model" "Read and execute code-quality-checker.md against this repo"
+      ;;
+    auto)
+      echo "${C_BOLD}Auto-mode: dispatching across all detected CLIs${C_RST}"
+      [ -x "$(command -v cqc-budget)" ] && cqc-budget < /dev/null 2>&1 | head -20
+      echo ""
+      echo "${C_DIM}Now run /cqc inside Claude Code to start the multi-CLI orchestrator.${C_RST}"
+      ;;
+    *)
+      echo "${C_RED}Unknown CLI: $cli${C_RST}"
+      echo "Valid: claude | gemini | opencode | codex | auto"
+      exit 1 ;;
+  esac
+}
+
+# ─── Argument parsing ─────────────────────────────────────────────
+seed_defaults
+
+YOLO=$(read_default yolo)
+DEFAULT_CLI=$(read_default default_cli)
+[ -z "$DEFAULT_CLI" ] && DEFAULT_CLI="gemini"
+MODEL=""
+
+# Parse flags
+while [ "${1:-}" != "" ]; do
+  case "$1" in
+    --yolo)          YOLO="true" ;;
+    --gemini-only)   DEFAULT_CLI="gemini" ;;
+    --claude-only)   DEFAULT_CLI="claude" ;;
+    --codex-only)    DEFAULT_CLI="codex" ;;
+    --opencode-only) DEFAULT_CLI="opencode" ;;
+    --auto|--all)    DEFAULT_CLI="auto" ;;
+    --model=*)       MODEL="${1#--model=}" ;;
+    --best)          MODEL="" ;;  # use default best
+    init)            shift; banner; cmd_init "$@"; exit 0 ;;
+    budget)          shift; exec cqc-budget "$@" ;;
+    run)             shift; banner; cmd_run "$DEFAULT_CLI" "${MODEL:-$(default_model $DEFAULT_CLI)}"; exit 0 ;;
+    status)          shift; banner; cmd_status; exit 0 ;;
+    set-default)     shift; cmd_set_default "$1"; exit 0 ;;
+    -h|--help|help)
+      banner
+      cat <<HELP
+${C_BOLD}USAGE${C_RST}
+  cqc                                # auto-run with defaults (gemini + best model)
+  cqc init                           # install kit into current repo
+  cqc run [--gemini-only] [--yolo]   # run audit
+  cqc budget                         # set %-thresholds interactively
+  cqc status                         # show CLI usage + reset times
+  cqc set-default <key>=<value>      # edit ~/.cqc/defaults.yaml
+
+${C_BOLD}FLAGS${C_RST}
+  --yolo                  skip all confirmations
+  --gemini-only           use only gemini (Gemini 3.1 Pro Preview by default)
+  --claude-only           use only claude (claude-opus-4-7 by default)
+  --codex-only            use only codex
+  --opencode-only         use only opencode
+  --auto / --all          dispatch across all detected CLIs
+  --model=<name>          override model
+  --best                  force the best model per CLI
+
+${C_BOLD}EXAMPLES${C_RST}
+  cqc init && cqc                                     # install + run
+  cqc --gemini-only --yolo                            # gemini, no prompts
+  cqc --gemini-only --model=gemini-3.1-pro-preview    # specific model
+  cqc set-default default_cli=gemini                  # always use gemini
+  cqc set-default yolo=true                           # always YOLO
+  cqc set-default best.gemini=gemini-3-pro            # change best model
+
+${C_BOLD}DEFAULTS${C_RST}
+  ${C_DIM}~/.cqc/defaults.yaml${C_RST}
+  default_cli: gemini    best.gemini: gemini-3.1-pro-preview
+HELP
+      exit 0 ;;
+    *)
+      echo "${C_RED}Unknown arg: $1${C_RST}"
+      echo "Run: cqc --help"
+      exit 1 ;;
+  esac
+  shift
+done
+
+# ─── No args → auto-run ───────────────────────────────────────────
+banner
+echo "${C_DIM}Default CLI: $DEFAULT_CLI · Model: ${MODEL:-$(default_model $DEFAULT_CLI)} · YOLO: $YOLO${C_RST}"
+echo ""
+
+# If repo not initialized, init first
+if [ ! -f code-quality-checker.md ]; then
+  cmd_init
+  echo ""
+fi
+
+# Run with current defaults
+export YOLO
+cmd_run "$DEFAULT_CLI" "${MODEL:-$(default_model $DEFAULT_CLI)}"

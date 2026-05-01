@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # code-quality-skills-kit installer
-# One-line install: curl -sSL https://raw.githubusercontent.com/servas-ai/code-quality-skills-kit/main/install.sh | sh
+# curl -sSL https://raw.githubusercontent.com/servas-ai/code-quality-skills-kit/main/install.sh | sh
 set -euo pipefail
 umask 077
 
@@ -9,7 +9,6 @@ TARGET="${1:-.}"
 
 [ ! -d "$TARGET" ] && { echo "❌ Target not found: $TARGET"; exit 1; }
 cd "$TARGET"
-
 [ ! -d .git ] && { echo "⚠ Not a git repo. Run 'git init' first."; exit 1; }
 
 TMP=$(mktemp -d)
@@ -18,30 +17,36 @@ trap "rm -rf '$TMP'" EXIT
 echo "📦 Cloning kit (depth 1)…"
 git clone --depth 1 --quiet "$REPO" "$TMP/kit"
 
-echo "📋 Installing into $TARGET …"
+echo "📋 Installing kit into $TARGET …"
 cp "$TMP/kit/code-quality-checker.md" .
 cp -r "$TMP/kit/code-quality-skills" .
 
-# Install cqc-budget CLI to ~/.local/bin (or /usr/local/bin if writable)
+# Install cqc + cqc-budget binaries
 DEST="$HOME/.local/bin"
-if [ ! -d "$DEST" ]; then
-  mkdir -p "$DEST"
-fi
+mkdir -p "$DEST"
+cp "$TMP/kit/bin/cqc" "$DEST/cqc"
 cp "$TMP/kit/bin/cqc-budget" "$DEST/cqc-budget"
-chmod +x "$DEST/cqc-budget"
-echo "🔧 Installed cqc-budget → $DEST/cqc-budget"
-case ":$PATH:" in
-  *":$DEST:"*) ;;
-  *) echo "    Add to your shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-esac
+chmod +x "$DEST/cqc" "$DEST/cqc-budget"
+echo "🔧 Installed: cqc + cqc-budget → $DEST/"
+
+# Register /cqc slash command for Claude Code
+if [ -d "$HOME/.claude" ]; then
+  mkdir -p "$HOME/.claude/commands"
+  cp "$TMP/kit/code-quality-checker.md" "$HOME/.claude/commands/cqc.md"
+  echo "⚡ Registered: /cqc slash-command for Claude Code"
+fi
 
 # .gitignore
 if ! grep -q "^audit-reports/$" .gitignore 2>/dev/null; then
-  echo "" >> .gitignore
-  echo "# code-quality-skills-kit" >> .gitignore
-  echo "audit-reports/" >> .gitignore
-  echo "✏️  Added 'audit-reports/' to .gitignore"
+  { echo ""; echo "# code-quality-skills-kit"; echo "audit-reports/"; } >> .gitignore
+  echo "✏️  Added 'audit-reports/' → .gitignore"
 fi
+
+# PATH check
+case ":$PATH:" in
+  *":$DEST:"*) ;;
+  *) echo ""; echo "  ⚠ Add to your shell:  ${C_CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${C_RST}" ;;
+esac
 
 # Stack detect
 STACK="unknown"
@@ -53,17 +58,21 @@ FILES=$(git ls-files | wc -l)
 
 cat <<NEXT
 
-✅ Installed code-quality-skills-kit
-   Stack: $STACK · Files: $FILES
+✅ Installed code-quality-skills-kit (Stack: $STACK · Files: $FILES)
 
-▶ Next:
-   1. cqc-budget                   # interactive: set per-CLI % thresholds
-   2. /code-quality-checker        # in Claude Code: run audit using config
+▶ Start auditing — pick one:
 
-▶ Or skip cqc-budget and run audit with defaults:
-   /code-quality-checker --yes
+  cqc                              # auto-run (gemini-3.1-pro-preview, best model)
+  cqc --yolo                       # YOLO mode (skip all prompts)
+  cqc --gemini-only --yolo         # Gemini only, fastest path
+  /cqc                             # in Claude Code (slash command)
 
-▶ Output: audit-reports/<date>__<sha>/
-   REPORT.md · REPORT.compact.txt · dashboard.html · fix-prompts.md · _findings.jsonl
+▶ Configure:
+
+  cqc set-default default_cli=gemini      # always use gemini
+  cqc set-default yolo=true               # always YOLO mode
+  cqc budget                              # set %-thresholds interactively
+
+▶ Output: audit-reports/<date>__<sha>/  →  REPORT.md · dashboard.html · fix-prompts.md
 
 NEXT
