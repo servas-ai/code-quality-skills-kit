@@ -355,6 +355,32 @@ def time_ago(iso):
         return None
 
 
+# Cache CLI --version probes for 5 min — these are the /api/state hotpath bottleneck.
+_cli_version_cache = {}  # name -> (installed, ver, expires_at)
+
+
+def _probe_cli_version(name):
+    now = time.time()
+    cached = _cli_version_cache.get(name)
+    if cached and cached[2] > now:
+        return cached[0], cached[1]
+    installed, ver = False, None
+    try:
+        r = subprocess.run([name, "--version"], capture_output=True, text=True, timeout=2)
+        installed = r.returncode == 0
+        m = re.search(r"(\d+\.\d+\.\d+)", (r.stdout or "") + (r.stderr or ""))
+        ver = m.group(1) if m else None
+    except Exception:
+        pass
+    _cli_version_cache[name] = (installed, ver, now + 300)  # 5 min TTL
+    return installed, ver
+
+
+# Cache get_state() result for 2s — SSE streams call it every 3s per client.
+_state_cache = {"ts": 0, "data": None}
+_state_lock = threading.Lock()
+
+
 def cli_status():
     out = []
     metrics = get_metrics()
@@ -362,14 +388,7 @@ def cli_status():
     usage_by_cli = usage.get("by_cli", {})
     budget = load_budget()
     for name in CLIS:
-        installed, ver = False, None
-        try:
-            r = subprocess.run([name, "--version"], capture_output=True, text=True, timeout=2)
-            installed = r.returncode == 0
-            m = re.search(r"(\d+\.\d+\.\d+)", (r.stdout or "") + (r.stderr or ""))
-            ver = m.group(1) if m else None
-        except Exception:
-            pass
+        installed, ver = _probe_cli_version(name)
         plan = "—"
         if name == "claude":
             p = os.path.expanduser("~/.claude/auth.json")
@@ -554,6 +573,11 @@ def list_runs():
 
 
 def get_state():
+    # 2s response cache — SSE clients hit this every 3s; cli_status() is heavy
+    now = time.time()
+    with _state_lock:
+        if _state_cache["data"] and (now - _state_cache["ts"]) < 2:
+            return _state_cache["data"]
     runs = list_runs()
     active = [r for r in runs if r.get("live")]
     recent = [r for r in runs if not r.get("live")][:5]
@@ -567,20 +591,25 @@ def get_state():
     for day in sorted(by_day)[-7:]:
         spark.append(by_day[day])
     usage = load_usage()
-    return {
+    clis_snapshot = cli_status()  # call once, not twice
+    state = {
         "version": VERSION,
         "root": ROOT,
-        "clis": cli_status(),
+        "clis": clis_snapshot,
         "active": active,
         "recent": recent,
         "totals": {"runs": len(runs), "findings": total_findings, "spark": spark,
-                   "usd_today": round(sum((c.get("today_usd") or 0) for c in cli_status()), 4)},
+                   "usd_today": round(sum((c.get("today_usd") or 0) for c in clis_snapshot), 4)},
         "usage_meta": {
             "updated_at": usage.get("updated_at"),
             "errors": usage.get("errors", []),
         },
         "ts": now_iso(),
     }
+    with _state_lock:
+        _state_cache["data"] = state
+        _state_cache["ts"] = now
+    return state
 
 
 def spawn_run(scope, clis_list, mode="parallel", max_parallel=20):
@@ -635,7 +664,7 @@ JS = r"""let STATE=null;let MODE='parallel';const $=(id)=>document.getElementByI
 function fmtDuration(s){s=Number(s||0);if(s<60)return s+'s';if(s<3600){const m=Math.floor(s/60),r=s%60;return r?m+'m '+r+'s':m+' min';}const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return m?h+'h '+m+'m':h+' h';}
 async function openSettings(){const r=await fetch('/api/budget');const b=r.ok?await r.json():{};const cli_inputs=Object.keys(b.caps_pct||{}).map(c=>`<div class="set-row"><label class="set-lbl">${c}</label><input type="range" min="0" max="100" step="5" value="${b.caps_pct[c]}" id="cap-${c}" oninput="document.getElementById('cap-v-${c}').textContent=this.value+'%'"><span id="cap-v-${c}" style="min-width:40px;color:var(--violet);font-weight:600">${b.caps_pct[c]}%</span></div>`).join('');const chain_inputs=Object.keys(b.model_chains||{}).map(c=>`<div class="set-row"><label class="set-lbl">${c}</label><input type="text" id="chain-${c}" value="${(b.model_chains[c]||[]).join(', ')}" style="flex:1"></div>`).join('');const mrs=b.max_run_seconds||1800;const sts=b.stall_timeout_seconds||240;$('settings-body').innerHTML=`<div class="set-section"><div class="set-h">Wochenlimit pro CLI (% von voller Quota; 0 = HARD BLOCK)</div>${cli_inputs}</div><div class="set-section"><div class="set-h">⏱ Runtime Limits (Agent Hard-Cap pro Run)</div><div class="set-row" title="Hard cap on the entire audit run; passed to mco --review-hard-timeout"><label class="set-lbl">Max Run</label><input type="range" min="60" max="7200" step="60" value="${mrs}" id="max-run" oninput="document.getElementById('max-run-v').textContent=fmtDuration(this.value)"><span id="max-run-v" style="min-width:60px;color:var(--violet);font-weight:600">${fmtDuration(mrs)}</span></div><div class="set-row" title="Per-provider stall before kill; passed to mco --stall-timeout"><label class="set-lbl">Stall Timeout</label><input type="range" min="60" max="900" step="30" value="${sts}" id="stall-to" oninput="document.getElementById('stall-to-v').textContent=this.value+'s'"><span id="stall-to-v" style="min-width:60px;color:var(--violet);font-weight:600">${sts}s</span></div></div><div class="set-section"><div class="set-h">Model chains (comma-separated, primary → fallback → ...)</div>${chain_inputs}</div><div class="set-section"><div class="set-h">Parallel max</div><div class="set-row"><label class="set-lbl">parallel_max</label><input type="number" id="parallel-max" min="1" max="50" value="${b.parallel_max||20}" style="width:80px"></div></div>`;$('settings-modal').classList.add('on');}
 function closeSettings(){$('settings-modal').classList.remove('on')}
-async function saveSettings(){const caps={};document.querySelectorAll('[id^=cap-]').forEach(el=>{if(el.id.startsWith('cap-v-'))return;const c=el.id.slice(4);caps[c]=parseInt(el.value);});const chains={};document.querySelectorAll('[id^=chain-]').forEach(el=>{const c=el.id.slice(6);chains[c]=el.value.split(',').map(s=>s.trim()).filter(Boolean);});const pm=parseInt($('parallel-max').value)||20;const mrs=parseInt($('max-run').value)||1800;const sts=parseInt($('stall-to').value)||240;const r=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({caps_pct:caps,model_chains:chains,parallel_max:pm,max_run_seconds:mrs,stall_timeout_seconds:sts})});const j=await r.json();if(j.ok){toast('💾 Budget saved · Max Run: '+fmtDuration(mrs)+' · Stall: '+sts+'s');closeSettings();refresh();}else{toast('Save failed: '+(j.error||'unknown'));}}function closeDrawer(){$('drawer').classList.remove('on')}function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),5000)}async function refreshUsage(){const btn=$('refresh');btn.classList.add('spinning');btn.disabled=true;try{const r=await fetch('/api/usage/refresh',{method:'POST'});const j=await r.json();if(j.ok){toast('✓ Usage refreshed');refresh();}else{toast('Refresh failed: '+(j.error||j.stderr||'unknown'));}}catch(e){toast('Refresh error: '+e.message);}finally{btn.classList.remove('spinning');btn.disabled=false;}}$('refresh').onclick=refreshUsage;$('settings').onclick=openSettings;$('orch').onclick=()=>openModal('orchestrate');$('run').onclick=()=>openModal('parallel');$('pause').onclick=pauseAll;refresh();startSSE();"""
+async function saveSettings(){const caps={};document.querySelectorAll('[id^=cap-]').forEach(el=>{if(el.id.startsWith('cap-v-'))return;const c=el.id.slice(4);caps[c]=parseInt(el.value);});const chains={};document.querySelectorAll('[id^=chain-]').forEach(el=>{const c=el.id.slice(6);chains[c]=el.value.split(',').map(s=>s.trim()).filter(Boolean);});const pm=parseInt($('parallel-max').value)||20;const mrs=parseInt($('max-run').value)||1800;const sts=parseInt($('stall-to').value)||240;const r=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({caps_pct:caps,model_chains:chains,parallel_max:pm,max_run_seconds:mrs,stall_timeout_seconds:sts})});const j=await r.json();if(j.ok){toast('💾 Budget saved · Max Run: '+fmtDuration(mrs)+' · Stall: '+sts+'s');closeSettings();refresh();}else{toast('Save failed: '+(j.error||'unknown'));}}function closeDrawer(){$('drawer').classList.remove('on')}function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),5000)}async function refreshUsage(){const btn=$('refresh');btn.classList.add('spinning');btn.disabled=true;try{const r=await fetch('/api/usage/refresh',{method:'POST'});const j=await r.json();if(j.ok){toast('✓ Usage refreshed');refresh();}else{toast('Refresh failed: '+(j.error||j.stderr||'unknown'));}}catch(e){toast('Refresh error: '+e.message);}finally{btn.classList.remove('spinning');btn.disabled=false;}}$('refresh').onclick=refreshUsage;$('settings').onclick=openSettings;$('orch').onclick=()=>openModal('orchestrate');$('run').onclick=()=>openModal('parallel');$('pause').onclick=pauseAll;document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();closeSettings();closeDrawer();}});['modal','settings-modal'].forEach(id=>{const m=$(id);if(m)m.addEventListener('click',e=>{if(e.target===m){if(id==='modal')closeModal();else closeSettings();}});});refresh();startSSE();"""
 
 BODY = '<div class="wrap"><header><h1>cqc · <span class="dot green" id="conn"></span> live <small id="ver"></small> <small id="usage-meta" style="margin-left:12px"></small></h1><div class="actions"><button id="settings" title="Edit caps & model chains">⚙ Settings</button><button id="refresh" title="Pull real ccusage data">🔄 Refresh</button><button id="orch" style="border-color:var(--violet);color:var(--violet)">▶ Orchestrate (20p)</button><button id="run">▶ Run Audit</button><button class="danger" id="pause">⏸ Pause All</button></div></header><div class="tiles" id="tiles"></div><section><h2>Active runs</h2><div id="active"></div></section><div class="split"><section><h2>Recent runs</h2><div class="pills" id="recent"></div></section><div class="spend"><div class="lab">Total spend (7d)</div><div class="big" id="spend-total">$0.00</div><div class="spark" id="spark"></div></div></div><footer><span id="foot-l">connecting…</span><span id="foot-r"></span></footer></div><div class="modal" id="modal"><div class="box"><h3 id="modal-title">Run audit</h3><div id="cli-checks"></div><input type="text" id="scope" value="." placeholder="scope (default .)"><div id="mp-row" style="margin-top:8px;display:none"><label>Max parallel agents</label><input type="number" id="mp" value="20" min="1" max="50"></div><div class="row"><button class="btn-x" onclick="closeModal()">Cancel</button><button onclick="confirmRun()">Confirm</button></div></div></div><div class="drawer" id="drawer"><div class="panel"><h3 id="drawer-title"></h3><div id="drawer-body"></div><div style="text-align:right;margin-top:10px"><button class="btn-x" onclick="closeDrawer()">Close</button></div></div></div><div class="modal" id="settings-modal"><div class="box" style="width:560px;max-height:80vh;overflow:auto"><h3>⚙ Budget &amp; Model Chains</h3><div id="settings-body">Loading…</div><div class="row"><button class="btn-x" onclick="closeSettings()">Cancel</button><button onclick="saveSettings()">💾 Save</button></div></div></div><div class="toast" id="toast"></div>'
 
