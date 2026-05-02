@@ -37,7 +37,7 @@ def load_budget():
         return {"caps_pct": {"claude":0,"codex":50,"gemini":100,"opencode":100},
                 "models": {"opencode_model":"opencode-go/glm-5.1",
                            "gemini_primary":"gemini-3.1-pro-preview",
-                           "gemini_fallback":"gemini-2.5-flash"},
+                           "gemini_fallback":"gemini-3-flash-preview"},
                 "parallel_max": 20, "shard_max_files": 25}
 
 
