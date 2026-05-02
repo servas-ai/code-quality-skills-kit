@@ -14,7 +14,9 @@ SCOPE="."
 MAX_PARALLEL=10
 PLAN_ONLY=0
 INCLUDE_CLAUDE=0
-STALL_TIMEOUT="${CQC_TIMEOUT:-240}"
+STALL_TIMEOUT=""        # empty = use budget value (resolved later)
+STALL_TIMEOUT_EXPLICIT=0
+MAX_RUN_SECONDS=""      # empty = use budget value (resolved later)
 BUDGET_FILE=""
 PREFILTER_DIR=""
 MCO_BIN="${MCO_BIN:-mco}"
@@ -24,15 +26,17 @@ while [ "${1:-}" != "" ]; do
   case "$1" in
     --max-parallel=*)    MAX_PARALLEL="${1#--max-parallel=}" ;;
     --max-parallel)      shift; MAX_PARALLEL="$1" ;;
-    --stall-timeout=*)   STALL_TIMEOUT="${1#--stall-timeout=}" ;;
-    --stall-timeout)     shift; STALL_TIMEOUT="$1" ;;
+    --stall-timeout=*)   STALL_TIMEOUT="${1#--stall-timeout=}"; STALL_TIMEOUT_EXPLICIT=1 ;;
+    --stall-timeout)     shift; STALL_TIMEOUT="$1"; STALL_TIMEOUT_EXPLICIT=1 ;;
+    --max-run-seconds=*) MAX_RUN_SECONDS="${1#--max-run-seconds=}" ;;
+    --max-run-seconds)   shift; MAX_RUN_SECONDS="$1" ;;
     --plan-only)         PLAN_ONLY=1 ;;
     --include-claude)    INCLUDE_CLAUDE=1 ;;
     --budget=*)          BUDGET_FILE="${1#--budget=}" ;;
     --prefilter-dir=*)   PREFILTER_DIR="${1#--prefilter-dir=}" ;;
     --scope=*)           SCOPE="${1#--scope=}" ;;
     --scope)             shift; SCOPE="$1" ;;
-    --timeout=*)         STALL_TIMEOUT="${1#--timeout=}" ;;  # legacy
+    --timeout=*)         STALL_TIMEOUT="${1#--timeout=}"; STALL_TIMEOUT_EXPLICIT=1 ;;  # legacy
     --shard=*|--shard)   ;; # legacy: MCO controls sharding
     -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
     --*) ;;
@@ -40,6 +44,12 @@ while [ "${1:-}" != "" ]; do
   esac
   shift
 done
+
+# Allow legacy CQC_TIMEOUT env to seed stall_timeout if not given via flag
+if [ "$STALL_TIMEOUT_EXPLICIT" = "0" ] && [ -n "${CQC_TIMEOUT:-}" ]; then
+  STALL_TIMEOUT="$CQC_TIMEOUT"
+  STALL_TIMEOUT_EXPLICIT=1
+fi
 
 if [ -t 1 ]; then
   C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_AMBER=$'\033[33m'; C_RED=$'\033[31m'
@@ -83,11 +93,27 @@ if not caps and "budget_thresholds" in cfg:
     for k, v in (cfg["budget_thresholds"] or {}).items():
         m = re.match(r"\s*(\d+)\s*%?\s*", str(v))
         caps[k] = int(m.group(1)) if m else 0
-print(json.dumps({"caps_pct": caps}))
+out = {"caps_pct": caps}
+# Runtime sliders (set via cqc-ui Settings modal). Defaults match dashboard defaults.
+try:
+    out["max_run_seconds"] = int(cfg.get("max_run_seconds", 1800))
+except Exception:
+    out["max_run_seconds"] = 1800
+try:
+    out["stall_timeout_seconds"] = int(cfg.get("stall_timeout_seconds", 240))
+except Exception:
+    out["stall_timeout_seconds"] = 240
+print(json.dumps(out))
 PY
 }
 BUDGET_JSON="$(read_budget)"
 cap_for() { echo "$BUDGET_JSON" | jq -r --arg c "$1" '.caps_pct[$c] // 0'; }
+
+# Resolve runtime caps from budget unless explicitly overridden on CLI
+BUDGET_STALL=$(echo "$BUDGET_JSON" | jq -r '.stall_timeout_seconds // 240')
+BUDGET_MAXRUN=$(echo "$BUDGET_JSON" | jq -r '.max_run_seconds // 1800')
+[ "$STALL_TIMEOUT_EXPLICIT" = "0" ] && STALL_TIMEOUT="$BUDGET_STALL"
+[ -z "$MAX_RUN_SECONDS" ]            && MAX_RUN_SECONDS="$BUDGET_MAXRUN"
 
 # ─── Probe live quota via mco doctor ──────────────────────────────
 DOCTOR_JSON="$($MCO_BIN doctor --json 2>/dev/null || echo '{}')"
@@ -154,6 +180,18 @@ fi
 
 PROMPT="Code-quality audit (CQC kit). Walk target paths, identify critical/high-severity issues across security, correctness, performance, maintainability. Emit one finding per issue with file:line, rule, severity (c/h/m/l), short message. Read-only, no edits."
 
+# Format runtime cap for display (e.g. 1800 -> "30m", 3600 -> "1h", 90 -> "90s")
+fmt_dur() {
+  local s="$1"
+  if [ "$s" -lt 60 ]; then echo "${s}s"
+  elif [ "$s" -lt 3600 ]; then echo "$((s/60))m"
+  else
+    local h=$((s/3600)); local m=$(((s%3600)/60))
+    if [ "$m" -eq 0 ]; then echo "${h}h"; else echo "${h}h${m}m"; fi
+  fi
+}
+RUNTIME_CAP_FMT="$(fmt_dur "$MAX_RUN_SECONDS")"
+
 # ─── Build MCO command ────────────────────────────────────────────
 MCO_CMD=(
   "$MCO_BIN" review
@@ -163,6 +201,7 @@ MCO_CMD=(
   --target-paths "$TARGETS"
   --max-provider-parallelism "$MAX_PARALLEL"
   --stall-timeout "$STALL_TIMEOUT"
+  --review-hard-timeout "$MAX_RUN_SECONDS"
   --artifact-base "$RUN_DIR/mco-output"
   --result-mode both
   --save-artifacts
@@ -177,7 +216,7 @@ echo "${C_BOLD}│${C_RST} scope:     ${C_CYAN}$SCOPE${C_RST}"
 echo "${C_BOLD}│${C_RST} providers: ${C_GREEN}$PROV_CSV${C_RST}"
 [ "${#SKIPPED[@]}" -gt 0 ] && echo "${C_BOLD}│${C_RST} skipped:   ${C_AMBER}${SKIPPED[*]}${C_RST}"
 echo "${C_BOLD}│${C_RST} prefilter: ${PREFILTER_DIR:-<none>} ($CLEAN_COUNT clean files excluded)"
-echo "${C_BOLD}│${C_RST} parallel:  $MAX_PARALLEL · stall: ${STALL_TIMEOUT}s"
+echo "${C_BOLD}│${C_RST} parallel:  $MAX_PARALLEL · runtime cap: ${RUNTIME_CAP_FMT} · stall: ${STALL_TIMEOUT}s"
 echo "${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RST}"
 
 # Save the planned command for reproducibility.
