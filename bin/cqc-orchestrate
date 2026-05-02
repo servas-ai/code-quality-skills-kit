@@ -66,7 +66,11 @@ data = open(p).read()
 try:
     cfg = json.loads(data)
 except Exception:
-    import yaml
+    try:
+        import yaml
+    except ImportError:
+        sys.stderr.write("⚠ Budget file is YAML but PyYAML missing. Install: pip install pyyaml — OR use ~/.cqc/budget.json (JSON).\n")
+        sys.exit(2)
     cfg = yaml.safe_load(data) or {}
 caps = cfg.get("caps_pct") or {}
 # Accept "75%" strings from cqc-budget.yaml's budget_thresholds form too.
@@ -107,7 +111,12 @@ add_provider() {
 for p in claude codex gemini opencode qwen; do add_provider "$p"; done
 
 if [ "${#PROVIDERS[@]}" -eq 0 ]; then
-  echo "${C_RED}❌ No eligible providers. Skipped: ${SKIPPED[*]:-none}${C_RST}" >&2; exit 1
+  if [ "$PLAN_ONLY" = "1" ]; then
+    echo "${C_AMBER}⚠ No eligible providers (plan-only mode). Skipped: ${SKIPPED[*]:-none}${C_RST}" >&2
+    PROVIDERS=("(none-eligible)")
+  else
+    echo "${C_RED}❌ No eligible providers. Skipped: ${SKIPPED[*]:-none}${C_RST}" >&2; exit 1
+  fi
 fi
 PROV_CSV="$(IFS=,; echo "${PROVIDERS[*]}")"
 

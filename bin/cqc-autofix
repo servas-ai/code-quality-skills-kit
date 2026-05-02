@@ -57,10 +57,15 @@ for u in "${UNITS[@]}"; do i=$((i+1))
   git -C "$WT" add -A && git -C "$WT" commit -m "$TITLE" >/dev/null 2>&1 || true
 
   OK=1
-  PM="pnpm"; [ -f "$REPO/package-lock.json" ] && PM="npm"
-  gate "$WT" "$PM run typecheck" "typecheck" || OK=0
-  gate "$WT" "$PM run lint"      "lint"      || OK=0
-  gate "$WT" "$PM test --silent" "test"      || OK=0
+  if   [ -f "$REPO/pnpm-lock.yaml" ];     then PM="pnpm"
+  elif [ -f "$REPO/yarn.lock" ];          then PM="yarn"
+  elif [ -f "$REPO/package-lock.json" ];  then PM="npm"
+  elif [ -f "$REPO/bun.lockb" ];          then PM="bun"
+  else PM="npm"; fi
+  has_script() { node -e "p=require('$REPO/package.json');process.exit(p.scripts&&p.scripts['$1']?0:1)" 2>/dev/null; }
+  has_script typecheck && { gate "$WT" "$PM run typecheck" "typecheck" || OK=0; } || echo "    ↷ skip typecheck (no script)"
+  has_script lint      && { gate "$WT" "$PM run lint"      "lint"      || OK=0; } || echo "    ↷ skip lint (no script)"
+  has_script test      && { gate "$WT" "$PM test --silent" "test"      || OK=0; } || echo "    ↷ skip test (no script)"
 
   if [ "$OK" = "1" ]; then
     git -C "$WT" push -u origin "$BR" 2>&1|tail -3 || true
