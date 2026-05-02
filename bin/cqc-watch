@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# cqc-watch — ensures cqc-ui is running and opens it in the default browser.
+# Used by `cqc-orchestrate` so a v4 run pops the live dashboard automatically.
+#
+# Usage:  cqc-watch                 # idempotent: no-op if already up
+#         cqc-watch --no-open       # only ensure server is up
+#         cqc-watch --port 4020     # custom port (default 4020)
+set -euo pipefail
+umask 077
+
+PORT="${CQC_UI_PORT:-4020}"
+OPEN=1
+while [ "${1:-}" != "" ]; do
+  case "$1" in
+    --port=*)   PORT="${1#--port=}" ;;
+    --port)     shift; PORT="$1" ;;
+    --no-open)  OPEN=0 ;;
+    -h|--help)  sed -n '2,7p' "$0"; exit 0 ;;
+  esac
+  shift
+done
+
+URL="http://localhost:$PORT/"
+
+# 1) Probe — is cqc-ui already up?
+if ! curl -sS -o /dev/null --max-time 1 "$URL"; then
+  SERVER="$(command -v cqc-ui.py || echo "$HOME/.local/bin/cqc-ui.py")"
+  [ -f "$SERVER" ] || { echo "cqc-watch: $SERVER not found" >&2; exit 1; }
+  CQC_PORT="$PORT" setsid python3 "$SERVER" >/tmp/cqcui.log 2>&1 < /dev/null &
+  # Wait up to 5s for HTTP 200
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 0.5
+    curl -sS -o /dev/null --max-time 1 "$URL" && break
+  done
+fi
+
+# 2) Open browser (Python stdlib — no new deps). Fallback: print URL prominently.
+if [ "$OPEN" = "1" ]; then
+  if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${BROWSER:-}" ]; then
+    python3 -c "import webbrowser,sys; sys.exit(0 if webbrowser.open('$URL') else 1)" 2>/dev/null || \
+      printf '\n  ▸ cqc-ui: open %s in your browser\n\n' "$URL"
+  else
+    printf '\n  \033[1;36m▸ cqc-ui live dashboard:\033[0m  %s\n\n' "$URL"
+  fi
+fi

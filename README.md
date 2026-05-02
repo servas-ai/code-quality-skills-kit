@@ -28,6 +28,27 @@ Then in Claude Code:
 /code-quality-checker --no-tools # greps only, skip typecheck/test/build
 ```
 
+## v4: External Logic Offloading (MCO + Static Pre-Filter)
+
+v4 removes ~80% of bash from the kit (≈3000 → 602 LOC) by delegating each layer to a single, dedicated tool. Four bins, each ~150 lines, replace the v3 monolith:
+
+| Bin | Layer | Delegates to |
+|-----|-------|--------------|
+| `cqc-prefilter`    | L0 — static pre-filter (parallel)         | Knip + jscpd by default; Semgrep + ast-grep optional |
+| `cqc-orchestrate`  | L1 — multi-CLI review across providers    | `mco review` (Multi-CLI Orchestrator) |
+| `cqc-score`        | L3 — KPI snapshot / before-after diff     | cloc, jscpd, ts-complex, knip |
+| `cqc-autofix`      | L3 — closed-loop dup-removal PRs          | `mco run` in a git worktree |
+
+Pre-filter runs all 4 tools in parallel and writes `clean-files.txt`; `cqc-orchestrate` uses it to skip files with zero static findings, so the LLM layer only sees dirty paths.
+
+When `cqc-orchestrate` starts (anything but `--plan-only`), `cqc-watch` boots `cqc-ui` on `:4020` if not already up and opens it in the default browser (or prints the URL when no DISPLAY). The dashboard shows a per-run `files_done / files_total` progress bar plus each CLI's daily and weekly plan limits pulled from `subscription.limits`.
+
+Example:
+
+```
+cqc-orchestrate --scope . --max-parallel 10
+```
+
 ## What you get
 
 - **15 dimensions** — D1 Correctness · D2 Types · D3 Tests · D4 Security · D5 Performance · D6 Architecture · D7 A11y · D8 Dead Code · D9 Docs · D10 CI Health · D11 i18n · D12 Deps · D13 Cache · D14 CSS Tokens · D15 Feature Flags

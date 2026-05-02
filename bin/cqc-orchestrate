@@ -46,6 +46,11 @@ if [ -t 1 ]; then
   C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RST=$'\033[0m'
 else C_CYAN=""; C_GREEN=""; C_AMBER=""; C_RED=""; C_BOLD=""; C_DIM=""; C_RST=""; fi
 
+# Open the live dashboard in the default browser (best-effort; off in --plan-only).
+if [ "$PLAN_ONLY" != "1" ] && command -v cqc-watch >/dev/null 2>&1; then
+  cqc-watch >/dev/null 2>&1 || true
+fi
+
 # ─── Resolve budget file (YAML or JSON) ───────────────────────────
 if [ -z "$BUDGET_FILE" ]; then
   if   [ -f "./cqc-budget.yaml"  ]; then BUDGET_FILE="./cqc-budget.yaml"
