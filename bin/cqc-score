@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# cqc-score — KPI tracker (L3). Delegates to cloc/jscpd/ts-complex/knip.
+# Usage:
+#   cqc-score --repo <path> --label before|after
+#   cqc-score --repo <path> --diff before after   # exit 1 on regression
+set -euo pipefail; umask 077
+
+REPO=""; LABEL=""; A=""; B=""; RUN_DIR=""
+while [ "${1:-}" != "" ]; do case "$1" in
+  --repo)   REPO="$2"; shift ;;  --repo=*) REPO="${1#--repo=}" ;;
+  --label)  LABEL="$2"; shift ;; --label=*) LABEL="${1#--label=}" ;;
+  --run-dir)RUN_DIR="$2"; shift ;;
+  --diff)   A="${2:-}"; B="${3:-}"; shift 2 ;;
+  -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
+esac; shift || true; done
+REPO="$(cd "${REPO:-$PWD}" && pwd)"
+
+if [ -z "$RUN_DIR" ]; then
+  AR="$REPO/audit-reports"; mkdir -p "$AR"
+  RUN_DIR="$(ls -1dt "$AR"/*/ 2>/dev/null | head -1 || true)"
+  [ -z "$RUN_DIR" ] && RUN_DIR="$AR/$(date +%Y-%m-%d)__score-$(date +%H%M%S)" && mkdir -p "$RUN_DIR"
+  RUN_DIR="${RUN_DIR%/}"
+fi
+mkdir -p "$RUN_DIR/score"
+G=$'\033[32m'; R=$'\033[31m'; C=$'\033[36m'; Z=$'\033[0m'; [ -t 1 ] || { G=""; R=""; C=""; Z=""; }
+
+snap() {
+  local lbl="$1" out="$RUN_DIR/score/${1}.json"
+  echo "${C}▸ snapshot [$lbl]${Z}" >&2
+  local loc=0 files=0 cxa=0 cxm=0 dup=0 dead=0
+  if command -v cloc >/dev/null; then
+    local j; j="$(cd "$REPO" && cloc --json --quiet --exclude-dir=node_modules,dist,build,.next,coverage . 2>/dev/null||echo '{}')"
+    loc="$(echo "$j"|jq -r '.SUM.code//0')"; files="$(echo "$j"|jq -r '.SUM.nFiles//0')"
+  else
+    loc="$(cd "$REPO" && find . -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \) \
+      ! -path './node_modules/*' ! -path '*/dist/*' ! -path '*/.next/*' ! -path '*/build/*' \
+      -exec wc -l {} + 2>/dev/null|tail -1|awk '{print $1+0}')"
+    files="$(cd "$REPO" && find . -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \) \
+      ! -path './node_modules/*' ! -path '*/dist/*' ! -path '*/.next/*' ! -path '*/build/*' 2>/dev/null|wc -l)"
+  fi
+  if command -v npx >/dev/null; then
+    local d="$RUN_DIR/score/.jscpd-$lbl"; mkdir -p "$d"
+    (cd "$REPO" && timeout 180 npx --yes jscpd --silent --reporters json --output "$d" \
+      --ignore "**/node_modules/**,**/dist/**,**/.next/**,**/build/**,**/coverage/**" \
+      --min-tokens 50 . >/dev/null 2>&1) || true
+    [ -f "$d/jscpd-report.json" ] && dup="$(jq -r '.statistics.total.duplicatedLines//0' "$d/jscpd-report.json" 2>/dev/null||echo 0)"
+    local cx="$RUN_DIR/score/.cx-$lbl.txt"
+    (cd "$REPO" && timeout 60 npx --yes ts-complex --threshold 10 \
+      "src/**/*.ts" "src/**/*.tsx" "lib/**/*.ts" "artifacts/**/src/**/*.{ts,tsx}" 2>/dev/null > "$cx") || true
+    if [ -s "$cx" ]; then
+      cxm="$(grep -oE '[0-9]+' "$cx"|sort -n|tail -1||echo 0)"
+      cxa="$(grep -oE '[0-9]+' "$cx"|awk '{s+=$1;n++} END{if(n)printf "%.1f",s/n; else print 0}')"
+    fi
+    if [ -f "$REPO/package.json" ]; then
+      local k="$RUN_DIR/score/.knip-$lbl.json"
+      (cd "$REPO" && timeout 120 npx --yes knip --reporter json > "$k" 2>/dev/null) || true
+      [ -s "$k" ] && dead="$(jq -r '[.issues[]?.exports//[]|length]|add//0' "$k" 2>/dev/null||echo 0)"
+    fi
+  fi
+  jq -n --arg l "$lbl" --arg t "$(date -u +%FT%TZ)" \
+    --argjson loc "${loc:-0}" --argjson f "${files:-0}" \
+    --argjson ca "${cxa:-0}" --argjson cm "${cxm:-0}" \
+    --argjson d "${dup:-0}" --argjson de "${dead:-0}" \
+    '{label:$l,timestamp:$t,loc:$loc,files:$f,complexity:{avg:$ca,max:$cm},duplicate_lines:$d,dead_exports:$de}' > "$out"
+  echo "${G}  loc=$loc files=$files cx_max=$cxm dups=$dup dead=$dead${Z}" >&2; cat "$out"
+}
+
+diff_snap() {
+  local fa="$RUN_DIR/score/${1}.json" fb="$RUN_DIR/score/${2}.json" out="$RUN_DIR/score-delta.json"
+  [ -f "$fa" ] && [ -f "$fb" ] || { echo "${R}missing snapshot${Z}" >&2; exit 2; }
+  local cfg="$REPO/cqc-score.config.yaml"
+  local tl=5 td=0 tc=0 te=0
+  if [ -f "$cfg" ]; then
+    tl="$(grep -oE 'loc_regression_pct:[[:space:]]*[0-9]+' "$cfg"|grep -oE '[0-9]+$'||echo 5)"
+    td="$(grep -oE 'duplicate_regression_pct:[[:space:]]*[0-9]+' "$cfg"|grep -oE '[0-9]+$'||echo 0)"
+    tc="$(grep -oE 'complexity_max_increase:[[:space:]]*[0-9]+' "$cfg"|grep -oE '[0-9]+$'||echo 0)"
+    te="$(grep -oE 'dead_exports_increase:[[:space:]]*[0-9]+' "$cfg"|grep -oE '[0-9]+$'||echo 0)"
+  fi
+  jq -n --slurpfile A "$fa" --slurpfile B "$fb" \
+    --argjson tl "$tl" --argjson td "$td" --argjson tc "$tc" --argjson te "$te" '
+    ($A[0]) as $a | ($B[0]) as $b |
+    def pct(x;y): if y==0 then 0 else ((x-y)*100/y) end;
+    {before:$a, after:$b,
+     delta:{loc:($b.loc-$a.loc), loc_pct:pct($b.loc;$a.loc), files:($b.files-$a.files),
+            complexity_max:($b.complexity.max-$a.complexity.max),
+            complexity_avg:($b.complexity.avg-$a.complexity.avg),
+            duplicate_lines:($b.duplicate_lines-$a.duplicate_lines),
+            dead_exports:($b.dead_exports-$a.dead_exports)},
+     thresholds:{loc_regression_pct:$tl,duplicate_regression_pct:$td,complexity_max_increase:$tc,dead_exports_increase:$te},
+     regression:((pct($b.loc;$a.loc)>$tl) or (($b.duplicate_lines-$a.duplicate_lines)>$td)
+                 or (($b.complexity.max-$a.complexity.max)>$tc)
+                 or (($b.dead_exports-$a.dead_exports)>$te))}' > "$out"
+  cat "$out"
+  if [ "$(jq -r '.regression' "$out")" = "true" ]; then
+    echo "${R}❌ REGRESSION → $out${Z}" >&2; exit 1
+  fi
+  echo "${G}✓ no regression → $out${Z}" >&2
+}
+
+if [ -n "$A" ] && [ -n "$B" ]; then diff_snap "$A" "$B"
+elif [ -n "$LABEL" ];        then snap "$LABEL"
+else echo "usage: cqc-score --repo PATH --label before|after  |  cqc-score --diff before after" >&2; exit 2
+fi

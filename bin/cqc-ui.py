@@ -388,13 +388,8 @@ def get_state():
 
 def spawn_run(scope, clis_list, mode="parallel", max_parallel=20):
     run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d__ui-%H%M%S")
-    if mode == "orchestrate":
-        cmd = ["cqc-orchestrate", f"--max-parallel={int(max_parallel)}", scope or "."]
-    else:
-        cmd = ["cqc-parallel"]
-        if clis_list:
-            cmd.append(f"--clis={','.join(clis_list)}")
-        cmd.append(scope or ".")
+    # v4: cqc-parallel is removed; both modes delegate to cqc-orchestrate (MCO).
+    cmd = ["cqc-orchestrate", f"--max-parallel={int(max_parallel)}", scope or "."]
     try:
         proc = subprocess.Popen(
             cmd, cwd=ROOT,
@@ -402,7 +397,7 @@ def spawn_run(scope, clis_list, mode="parallel", max_parallel=20):
             preexec_fn=os.setsid,
         )
     except FileNotFoundError:
-        return None, "cqc-parallel not found in PATH"
+        return None, "cqc-orchestrate not found in PATH"
     with PROCS_LOCK:
         RUNNING_PROCS[run_id] = {
             "pid": proc.pid, "scope": scope, "clis": clis_list,

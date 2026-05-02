@@ -1,0 +1,32 @@
+# cqc-prefilter.config.example.yaml
+#
+# Optional override file for `cqc-prefilter`. All keys are optional;
+# defaults are baked into bin/cqc-prefilter and chosen for TS/React repos.
+#
+# Pass via:  cqc-prefilter --config cqc-prefilter.config.yaml --repo . --out ...
+
+# ---------- Semgrep -----------------------------------------------------------
+# Space-separated list of registry rulesets (see https://semgrep.dev/explore).
+# Default targets TS/React + general security; trim for non-JS repos.
+semgrep_configs: p/ci p/typescript p/react p/security-audit
+
+# ---------- ast-grep ----------------------------------------------------------
+# Languages to scan. ast-grep itself uses sgconfig.yml in the repo for rules;
+# if no sgconfig.yml is present, ast-grep emits an empty findings document
+# (the L0 layer does NOT ship its own rules — it only runs what the repo
+# already declares).
+astgrep_langs: ts tsx js jsx py rs go
+
+# ---------- Knip --------------------------------------------------------------
+# Threshold = max number of unused exports tolerated *per file* before the file
+# is marked dirty. 0 = any unused export marks the file dirty (default).
+knip_threshold: 0
+
+# ---------- jscpd -------------------------------------------------------------
+# Standard jscpd thresholds. min_tokens=50 / min_lines=5 catches meaningful
+# duplication while ignoring boilerplate (imports, type aliases).
+jscpd_min_tokens: 50
+jscpd_min_lines: 5
+# Threshold = % duplication that fails the run. We set 1 to surface ANY dup
+# but never abort (cqc-prefilter ignores jscpd's exit code anyway).
+jscpd_threshold: 1

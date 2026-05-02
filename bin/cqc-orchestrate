@@ -1,49 +1,40 @@
 #!/usr/bin/env bash
-# cqc-orchestrate — file-sharded fan-out: up to 20 parallel agents
-#
-# Reads ~/.cqc/budget.json caps + models, walks the repo, builds a plan.json
-# that distributes files across CLIs by skill mix, then spawns up to N agents
-# in parallel (default 20).
-#
-# Claude is HARD-BLOCKED unless --include-claude is passed AND cap > 0.
-# Gemini auto-fallbacks to Flash (unmetered) on quota exhaust.
-# OpenCode uses GLM-5.1 (unmetered).
-# Codex stops at 50% cap.
-#
-# Usage:
-#   cqc-orchestrate                        # whole repo, all eligible CLIs
-#   cqc-orchestrate src/lib                # scope
-#   cqc-orchestrate --max-parallel=20      # explicit
-#   cqc-orchestrate --plan-only            # generate plan.json, no spawn
-#   cqc-orchestrate --include-claude       # opt-in (still requires cap>0)
+# cqc-orchestrate v4 — thin wrapper around `mco review`.
+# Reads cqc.config.yaml (or cqc-budget.yaml / ~/.cqc/budget.json) for caps_pct,
+# probes quota via `mco doctor --json`, excludes files from prefilter clean-files.txt.
+# Usage: cqc-orchestrate [SCOPE] [--max-parallel=N] [--plan-only]
+#        [--prefilter-dir=PATH] [--include-claude] [--stall-timeout=S] [--budget=PATH]
+# Env: CQC_TIMEOUT (legacy stall-timeout, default 240); MCO_BIN (default: mco)
 
 set -euo pipefail
 umask 077
 
-BUDGET_FILE="$HOME/.cqc/budget.json"
-USAGE_FILE="$HOME/.cqc/usage.json"
+# ─── Defaults ─────────────────────────────────────────────────────
 SCOPE="."
-MAX_PARALLEL=20
-SHARD_MAX=25
-TIMEOUT="${CQC_TIMEOUT:-300}"
+MAX_PARALLEL=10
 PLAN_ONLY=0
 INCLUDE_CLAUDE=0
+STALL_TIMEOUT="${CQC_TIMEOUT:-240}"
+BUDGET_FILE=""
+PREFILTER_DIR=""
+MCO_BIN="${MCO_BIN:-mco}"
 
+# ─── Args ─────────────────────────────────────────────────────────
 while [ "${1:-}" != "" ]; do
   case "$1" in
-    --max-parallel=*) MAX_PARALLEL="${1#--max-parallel=}" ;;
-    --shard=*)        SHARD_MAX="${1#--shard=}" ;;
-    --timeout=*)      TIMEOUT="${1#--timeout=}" ;;
-    --plan-only)      PLAN_ONLY=1 ;;
-    --include-claude) INCLUDE_CLAUDE=1 ;;
-    -h|--help)
-      cat <<HELP
-cqc-orchestrate — file-sharded fan-out across CLIs
-
-Reads ~/.cqc/budget.json. Claude blocked by default. Default 20 parallel agents.
-Plan-first: generates audit-reports/<run>/plan.json before spawning anything.
-HELP
-      exit 0 ;;
+    --max-parallel=*)    MAX_PARALLEL="${1#--max-parallel=}" ;;
+    --max-parallel)      shift; MAX_PARALLEL="$1" ;;
+    --stall-timeout=*)   STALL_TIMEOUT="${1#--stall-timeout=}" ;;
+    --stall-timeout)     shift; STALL_TIMEOUT="$1" ;;
+    --plan-only)         PLAN_ONLY=1 ;;
+    --include-claude)    INCLUDE_CLAUDE=1 ;;
+    --budget=*)          BUDGET_FILE="${1#--budget=}" ;;
+    --prefilter-dir=*)   PREFILTER_DIR="${1#--prefilter-dir=}" ;;
+    --scope=*)           SCOPE="${1#--scope=}" ;;
+    --scope)             shift; SCOPE="$1" ;;
+    --timeout=*)         STALL_TIMEOUT="${1#--timeout=}" ;;  # legacy
+    --shard=*|--shard)   ;; # legacy: MCO controls sharding
+    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
     --*) ;;
     *) [ "$SCOPE" = "." ] && SCOPE="$1" ;;
   esac
@@ -52,329 +43,158 @@ done
 
 if [ -t 1 ]; then
   C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_AMBER=$'\033[33m'; C_RED=$'\033[31m'
-  C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_VIOL=$'\033[35m'; C_RST=$'\033[0m'
-else
-  C_CYAN=""; C_GREEN=""; C_AMBER=""; C_RED=""; C_BOLD=""; C_DIM=""; C_VIOL=""; C_RST=""
+  C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RST=$'\033[0m'
+else C_CYAN=""; C_GREEN=""; C_AMBER=""; C_RED=""; C_BOLD=""; C_DIM=""; C_RST=""; fi
+
+# ─── Resolve budget file (YAML or JSON) ───────────────────────────
+if [ -z "$BUDGET_FILE" ]; then
+  if   [ -f "./cqc-budget.yaml"  ]; then BUDGET_FILE="./cqc-budget.yaml"
+  elif [ -f "./cqc.config.yaml"  ]; then BUDGET_FILE="./cqc.config.yaml"
+  elif [ -f "$HOME/.cqc/budget.json" ]; then BUDGET_FILE="$HOME/.cqc/budget.json"
+  else
+    echo "${C_RED}❌ No budget file found (cqc-budget.yaml | cqc.config.yaml | ~/.cqc/budget.json)${C_RST}" >&2
+    exit 1
+  fi
 fi
 
-# ─── Load budget ──────────────────────────────────────────────────
-if [ ! -f "$BUDGET_FILE" ]; then
-  echo "${C_RED}❌ $BUDGET_FILE missing${C_RST}" >&2; exit 1
-fi
-cap_for() { jq -r --arg c "$1" '.caps_pct[$c] // 0' "$BUDGET_FILE"; }
-model_for(){ jq -r --arg k "$1" '.models[$k] // ""' "$BUDGET_FILE"; }
-
-GEMINI_PRIMARY="$(model_for gemini_primary)"
-GEMINI_FALLBACK="$(model_for gemini_fallback)"
-OPENCODE_MODEL="$(model_for opencode_model)"
-
-# ─── Eligible CLIs (after caps + claude block) ────────────────────
-declare -a ELIGIBLE=()
-if [ "$INCLUDE_CLAUDE" = "1" ] && [ "$(cap_for claude)" -gt 0 ] && command -v claude >/dev/null 2>&1; then
-  ELIGIBLE+=(claude)
-fi
-[ "$(cap_for gemini)"   -gt 0 ] && command -v gemini   >/dev/null 2>&1 && ELIGIBLE+=(gemini)
-[ "$(cap_for codex)"    -gt 0 ] && command -v codex    >/dev/null 2>&1 && ELIGIBLE+=(codex)
-[ "$(cap_for opencode)" -gt 0 ] && command -v opencode >/dev/null 2>&1 && ELIGIBLE+=(opencode)
-
-if [ "${#ELIGIBLE[@]}" -eq 0 ]; then
-  echo "${C_RED}❌ No eligible CLIs (check $BUDGET_FILE caps)${C_RST}" >&2; exit 1
-fi
-
-# ─── Skill-to-CLI matrix (claude excluded; its skills folded into others) ─
-declare -A SKILLS=(
-  [claude]="d4 d6 d13"
-  [gemini]="d12 d8 d9 d6 d13"
-  [opencode]="d1 d3 d11 d14 d15 d4"
-  [codex]="d2 d5 d7 d10"
-)
-
-# ─── Setup run dir ────────────────────────────────────────────────
-RUN_ID="$(date -u +%Y-%m-%d)__orch-$(date +%H%M%S)"
-RUN_DIR="audit-reports/$RUN_ID"
-mkdir -p "$RUN_DIR/logs" "$RUN_DIR/shards"
-touch "$RUN_DIR/_findings.jsonl"
-
-echo "${C_BOLD}╭─────────────────────────────────────────────────────────────╮${C_RST}"
-echo "${C_BOLD}│${C_RST} ${C_VIOL}cqc-orchestrate${C_RST} · scope: ${C_CYAN}$SCOPE${C_RST}"
-echo "${C_BOLD}│${C_RST} run-id: ${C_DIM}$RUN_ID${C_RST}"
-echo "${C_BOLD}│${C_RST} eligible: ${C_GREEN}${ELIGIBLE[*]}${C_RST}  · max-parallel: ${MAX_PARALLEL}"
-echo "${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RST}"
-echo ""
-
-# ─── Discover files ───────────────────────────────────────────────
-echo "${C_BOLD}▸ Discovering files…${C_RST}"
-TMP_FILES="$RUN_DIR/_files.txt"
-if [ -d "$SCOPE" ]; then
-  find "$SCOPE" -type f \
-    \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \
-       -o -name "*.py" -o -name "*.rs" -o -name "*.go" -o -name "*.sh" \
-       -o -name "*.css" -o -name "*.json" -o -name "*.yaml" -o -name "*.yml" \) \
-    -not -path "*/node_modules/*" -not -path "*/.next/*" -not -path "*/.git/*" \
-    -not -path "*/dist/*" -not -path "*/build/*" -not -path "*/.cache/*" \
-    -not -path "*/audit-reports/*" \
-    > "$TMP_FILES" 2>/dev/null || true
-elif [ -f "$SCOPE" ]; then
-  echo "$SCOPE" > "$TMP_FILES"
-else
-  # Pattern (rg-style)
-  find . -type f -path "*$SCOPE*" -not -path "*/node_modules/*" -not -path "*/.git/*" > "$TMP_FILES" 2>/dev/null || true
-fi
-TOTAL_FILES=$(wc -l < "$TMP_FILES" | tr -d ' \n')
-echo "  ${C_DIM}${TOTAL_FILES} files in scope${C_RST}"
-echo ""
-
-# ─── Shard plan: distribute files across (CLI × skill) cells ──────
-# Each CLI gets weight ∝ |skills| · cap_pct.  Then files are sharded into chunks of SHARD_MAX.
-# Total shards capped at MAX_PARALLEL.
-
-build_plan() {
-  local eligible_csv
-  eligible_csv=$(IFS=,; echo "${ELIGIBLE[*]}")
-  CQC_ELIGIBLE="$eligible_csv" CQC_BUDGET="$BUDGET_FILE" CQC_FILES="$TMP_FILES" \
-  CQC_RUN_ID="$RUN_ID" CQC_SCOPE="$SCOPE" \
-  CQC_MAXP="$MAX_PARALLEL" CQC_SHARDMAX="$SHARD_MAX" \
-  python3 - <<'PY'
-import json, math, os, sys
-
-with open(os.environ["CQC_BUDGET"]) as f: budget = json.load(f)
-caps = budget.get("caps_pct", {})
-skills = {
-    "claude":   ["d4","d6","d13"],
-    "gemini":   ["d12","d8","d9","d6","d13"],
-    "opencode": ["d1","d3","d11","d14","d15","d4"],
-    "codex":    ["d2","d5","d7","d10"],
-}
-eligible = [c for c in os.environ["CQC_ELIGIBLE"].split(",") if c]
-files = [l.strip() for l in open(os.environ["CQC_FILES"]) if l.strip()]
-
-# Weight: skills × cap_pct (normalized)
-weights = {c: len(skills[c]) * (caps.get(c, 0)/100.0) for c in eligible}
-total_w = sum(weights.values()) or 1.0
-share   = {c: max(1, int(round(len(files) * weights[c] / total_w))) for c in eligible}
-
-# Re-balance to exactly len(files)
-diff = len(files) - sum(share.values())
-if diff > 0:
-    share[max(weights, key=weights.get)] += diff
-elif diff < 0:
-    for c in sorted(share, key=share.get, reverse=True):
-        if diff == 0: break
-        if share[c] > 1:
-            share[c] -= 1; diff += 1
-
-# Slice files
-plan = {"run_id": os.environ["CQC_RUN_ID"], "scope": os.environ["CQC_SCOPE"],
-        "total_files": len(files),
-        "max_parallel": int(os.environ["CQC_MAXP"]),
-        "shard_max": int(os.environ["CQC_SHARDMAX"]),
-        "caps_pct": caps, "shards": []}
-shard_max = int(os.environ["CQC_SHARDMAX"])
-max_par   = int(os.environ["CQC_MAXP"])
-i = 0
-shard_idx = 0
-for cli in eligible:
-    n = share[cli]
-    sub = files[i:i+n]; i += n
-    # Chunk into shard_max per shard
-    if not sub:
-        continue
-    nshards = math.ceil(len(sub) / shard_max)
-    # Cap shards per CLI proportionally to remaining budget
-    per_cli_max = max(1, int(round(max_par * weights[cli] / total_w)))
-    nshards = min(nshards, per_cli_max)
-    # Re-chunk evenly
-    chunk_size = math.ceil(len(sub) / nshards)
-    for s in range(nshards):
-        chunk = sub[s*chunk_size:(s+1)*chunk_size]
-        if not chunk: continue
-        plan["shards"].append({
-            "shard_id": f"s{shard_idx:02d}-{cli}",
-            "cli": cli,
-            "skills": skills[cli],
-            "files": chunk,
-            "file_count": len(chunk),
-        })
-        shard_idx += 1
-        if shard_idx >= max_par:
-            break
-    if shard_idx >= max_par:
-        break
-
-plan["shard_count"] = len(plan["shards"])
-print(json.dumps(plan, indent=2))
+# Normalise budget → JSON via python (handles YAML & JSON).
+read_budget() {
+  python3 - "$BUDGET_FILE" <<'PY'
+import json, sys, re
+p = sys.argv[1]
+data = open(p).read()
+try:
+    cfg = json.loads(data)
+except Exception:
+    import yaml
+    cfg = yaml.safe_load(data) or {}
+caps = cfg.get("caps_pct") or {}
+# Accept "75%" strings from cqc-budget.yaml's budget_thresholds form too.
+if not caps and "budget_thresholds" in cfg:
+    for k, v in (cfg["budget_thresholds"] or {}).items():
+        m = re.match(r"\s*(\d+)\s*%?\s*", str(v))
+        caps[k] = int(m.group(1)) if m else 0
+print(json.dumps({"caps_pct": caps}))
 PY
 }
+BUDGET_JSON="$(read_budget)"
+cap_for() { echo "$BUDGET_JSON" | jq -r --arg c "$1" '.caps_pct[$c] // 0'; }
 
-PLAN_JSON="$RUN_DIR/plan.json"
-build_plan > "$PLAN_JSON"
-SHARD_COUNT=$(jq '.shard_count' "$PLAN_JSON")
-echo "${C_BOLD}▸ Plan generated:${C_RST} $SHARD_COUNT shards across ${#ELIGIBLE[@]} CLIs"
-jq -r '.shards[] | "  • \(.shard_id) — \(.cli) — \(.file_count) files — skills: \(.skills | join(" "))"' "$PLAN_JSON"
-echo ""
+# ─── Probe live quota via mco doctor ──────────────────────────────
+DOCTOR_JSON="$($MCO_BIN doctor --json 2>/dev/null || echo '{}')"
+provider_ready() { echo "$DOCTOR_JSON" | jq -e -r --arg p "$1" '.providers[$p].ready // false' >/dev/null 2>&1; }
 
-cat > "$RUN_DIR/_run.json" <<EOF
-{"run_id":"$RUN_ID","scope":"$SCOPE","started_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","phase":"orchestrating","mode":"orchestrated","max_parallel":$MAX_PARALLEL,"shard_count":$SHARD_COUNT,"agents":{}}
-EOF
+# Optional: percent-used per CLI from ~/.cqc/usage.json
+USAGE_FILE="$HOME/.cqc/usage.json"
+used_pct() {
+  [ -f "$USAGE_FILE" ] || { echo 0; return; }
+  jq -r --arg c "$1" '(.by_cli[$c].used_pct // 0)' "$USAGE_FILE" 2>/dev/null | awk '{printf "%.0f", $1+0}'
+}
+
+# ─── Build provider list (cap > 0, ready, not over usage cap) ─────
+declare -a PROVIDERS=()
+declare -a SKIPPED=()
+add_provider() {
+  local p="$1" cap used
+  cap="$(cap_for "$p")"
+  used="$(used_pct "$p")"
+  if [ "${cap:-0}" -le 0 ]; then SKIPPED+=("$p:cap=0"); return; fi
+  if [ "$p" = "claude" ] && [ "$INCLUDE_CLAUDE" != "1" ]; then SKIPPED+=("$p:opt-in-required"); return; fi
+  if ! provider_ready "$p"; then SKIPPED+=("$p:not-ready"); return; fi
+  if [ "${used:-0}" -ge "${cap:-0}" ]; then SKIPPED+=("$p:used=${used}%≥cap=${cap}%"); return; fi
+  PROVIDERS+=("$p")
+}
+for p in claude codex gemini opencode qwen; do add_provider "$p"; done
+
+if [ "${#PROVIDERS[@]}" -eq 0 ]; then
+  echo "${C_RED}❌ No eligible providers. Skipped: ${SKIPPED[*]:-none}${C_RST}" >&2; exit 1
+fi
+PROV_CSV="$(IFS=,; echo "${PROVIDERS[*]}")"
+
+# ─── Resolve target paths and exclude clean files ────────────────
+RUN_ID="$(date -u +%Y-%m-%d)__orch-$(date +%H%M%S)"
+RUN_DIR="audit-reports/$RUN_ID"
+mkdir -p "$RUN_DIR/mco-output"
+
+# Auto-discover prefilter dir from latest audit-reports run if not given.
+if [ -z "$PREFILTER_DIR" ]; then
+  CAND="$(ls -1dt audit-reports/*/prefilter 2>/dev/null | head -n1 || true)"
+  [ -n "$CAND" ] && [ -f "$CAND/clean-files.txt" ] && PREFILTER_DIR="$CAND"
+fi
+
+TARGETS="$SCOPE"
+CLEAN_COUNT=0
+if [ -n "$PREFILTER_DIR" ] && [ -f "$PREFILTER_DIR/clean-files.txt" ]; then
+  CLEAN_COUNT=$(grep -c . "$PREFILTER_DIR/clean-files.txt" || true)
+  # MCO --target-paths is positive-list only → build dirty-set = scope ∖ clean.
+  if [ -d "$SCOPE" ]; then
+    find "$SCOPE" -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \
+      -o -name "*.py" -o -name "*.rs" -o -name "*.go" \) \
+      -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" \
+      -not -path "*/audit-reports/*" 2>/dev/null | sort -u > "$RUN_DIR/_all.txt"
+    sort -u "$PREFILTER_DIR/clean-files.txt" > "$RUN_DIR/_clean.txt"
+    comm -23 "$RUN_DIR/_all.txt" "$RUN_DIR/_clean.txt" > "$RUN_DIR/_dirty.txt"
+    [ -s "$RUN_DIR/_dirty.txt" ] && TARGETS="$(paste -sd, "$RUN_DIR/_dirty.txt")"
+  fi
+fi
+
+PROMPT="Code-quality audit (CQC kit). Walk target paths, identify critical/high-severity issues across security, correctness, performance, maintainability. Emit one finding per issue with file:line, rule, severity (c/h/m/l), short message. Read-only, no edits."
+
+# ─── Build MCO command ────────────────────────────────────────────
+MCO_CMD=(
+  "$MCO_BIN" review
+  --repo "$(pwd)"
+  --prompt "$PROMPT"
+  --providers "$PROV_CSV"
+  --target-paths "$TARGETS"
+  --max-provider-parallelism "$MAX_PARALLEL"
+  --stall-timeout "$STALL_TIMEOUT"
+  --artifact-base "$RUN_DIR/mco-output"
+  --result-mode both
+  --save-artifacts
+  --json
+  --strict-contract
+  --task-id "$RUN_ID"
+)
+
+echo "${C_BOLD}╭─ cqc-orchestrate v4 (MCO-backed) ──────────────────────────╮${C_RST}"
+echo "${C_BOLD}│${C_RST} run-id:    ${C_DIM}$RUN_ID${C_RST}"
+echo "${C_BOLD}│${C_RST} scope:     ${C_CYAN}$SCOPE${C_RST}"
+echo "${C_BOLD}│${C_RST} providers: ${C_GREEN}$PROV_CSV${C_RST}"
+[ "${#SKIPPED[@]}" -gt 0 ] && echo "${C_BOLD}│${C_RST} skipped:   ${C_AMBER}${SKIPPED[*]}${C_RST}"
+echo "${C_BOLD}│${C_RST} prefilter: ${PREFILTER_DIR:-<none>} ($CLEAN_COUNT clean files excluded)"
+echo "${C_BOLD}│${C_RST} parallel:  $MAX_PARALLEL · stall: ${STALL_TIMEOUT}s"
+echo "${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RST}"
+
+# Save the planned command for reproducibility.
+printf '%q ' "${MCO_CMD[@]}" > "$RUN_DIR/_mco-command.txt"; echo >> "$RUN_DIR/_mco-command.txt"
 
 if [ "$PLAN_ONLY" = "1" ]; then
-  echo "${C_AMBER}▸ --plan-only: spawn skipped${C_RST}"
-  echo "  plan: $PLAN_JSON"
+  echo ""; echo "${C_AMBER}▸ --plan-only: command not executed${C_RST}"
+  echo "Command:"; cat "$RUN_DIR/_mco-command.txt"
   exit 0
 fi
 
-# ─── Spawn shards in parallel (capped at MAX_PARALLEL) ────────────
-build_shard_prompt() {
-  local cli="$1" shard_id="$2" files_csv="$3" skills_str="$4"
-  cat <<PROMPT
-You are running sub-skills [$skills_str] from code-quality-skills-kit on behalf of CLI=$cli (shard $shard_id).
+cat > "$RUN_DIR/_run.json" <<EOF
+{"run_id":"$RUN_ID","scope":"$SCOPE","providers":"$PROV_CSV","started_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","phase":"running","mode":"mco","max_parallel":$MAX_PARALLEL}
+EOF
 
-Working directory: $(pwd)
-Run-id: $RUN_ID
-Shard-id: $shard_id
-Findings file (append JSONL): $RUN_DIR/_findings.jsonl
-Files in this shard:
-$files_csv
-
-For EACH skill assigned to you ($skills_str), audit ONLY the files listed above.
-Use rg/git/jq/wc only. READ-ONLY — no edits.
-
-ID prefix: ALWAYS prefix finding IDs with "$shard_id-" (e.g. ${shard_id}-C1).
-
-For each finding append ONE LINE of NDJSON to $RUN_DIR/_findings.jsonl:
-{"id":"${shard_id}-C1","sev":"c","dim":"d4","file":"<path>","line":N,"rule":"<rule>","msg":"<≤80c>","conf":1.0,"shard":"$shard_id","cli":"$cli"}
-
-When done, write to $RUN_DIR/logs/${shard_id}.done with: done|<finding_count>|<elapsed_seconds>
-
-Output a 2-line summary:
-1. Shard completed: $shard_id (cli=$cli, files=$(echo "$files_csv" | wc -l))
-2. Findings: c/h/m/l counts
-PROMPT
-}
-
-declare -A PIDS=()
-declare -A START=()
-declare -A SHARD_CLI=()
-
-spawn_shard() {
-  local idx="$1"
-  local shard_id=$(jq -r ".shards[$idx].shard_id" "$PLAN_JSON")
-  local cli=$(jq -r ".shards[$idx].cli" "$PLAN_JSON")
-  local skills_str=$(jq -r ".shards[$idx].skills | join(\" \")" "$PLAN_JSON")
-  local files_csv=$(jq -r ".shards[$idx].files[]" "$PLAN_JSON")
-  local prompt
-  prompt=$(build_shard_prompt "$cli" "$shard_id" "$files_csv" "$skills_str")
-  local log="$RUN_DIR/logs/${shard_id}.log"
-  local cmd
-
-  case "$cli" in
-    claude)
-      cmd=(claude --print --dangerously-skip-permissions --model claude-opus-4-7 "$prompt") ;;
-    gemini)
-      cmd=(gemini --yolo --approval-mode yolo -m "${GEMINI_PRIMARY:-gemini-3.1-pro-preview}" -p "$prompt") ;;
-    codex)
-      cmd=(codex exec --dangerously-bypass-approvals-and-sandbox "$prompt") ;;
-    opencode)
-      cmd=(opencode run --dangerously-skip-permissions --model "${OPENCODE_MODEL:-opencode-go/glm-5.1}" "$prompt") ;;
-  esac
-
-  ( timeout --kill-after=10 "$TIMEOUT" "${cmd[@]}" > "$log" 2>&1
-    EXIT=$?
-    if [ "$cli" = "gemini" ] && [ $EXIT -ne 0 ] && [ $EXIT -ne 124 ]; then
-      CHAIN=$(jq -r '.model_chains.gemini // [] | .[]' "$BUDGET_FILE" 2>/dev/null | tail -n +2)
-      for next_model in $CHAIN; do
-        if grep -qiE "RESOURCE_EXHAUSTED|429|quota|exceeded|rate.?limit" "$log" 2>/dev/null; then
-          echo "── [auto-fallback $next_model] ──" >> "$log"
-          timeout --kill-after=10 "$TIMEOUT" gemini --yolo --approval-mode yolo \
-            -m "$next_model" -p "$prompt" >> "$log" 2>&1
-          EXIT=$?
-          [ $EXIT -eq 0 ] && break
-        else
-          break
-        fi
-      done
-    fi
-    if   [ $EXIT -eq 0 ];   then echo "ok|$shard_id|$cli|$EXIT"      > "$RUN_DIR/logs/${shard_id}.status"
-    elif [ $EXIT -eq 124 ]; then echo "timeout|$shard_id|$cli|$EXIT" > "$RUN_DIR/logs/${shard_id}.status"
-    else                         echo "crash|$shard_id|$cli|$EXIT"   > "$RUN_DIR/logs/${shard_id}.status"
-    fi
-  ) &
-  PIDS[$shard_id]=$!
-  START[$shard_id]=$(date +%s)
-  SHARD_CLI[$shard_id]="$cli"
-}
-
-echo "${C_BOLD}▸ Spawning ${SHARD_COUNT} shards (cap: ${MAX_PARALLEL})…${C_RST}"
-for ((i=0; i<SHARD_COUNT; i++)); do
-  spawn_shard "$i"
-  echo "${C_DIM}  • shard $(printf "%02d" "$i") spawned${C_RST}"
-done
-echo ""
-echo "${C_BOLD}▸ ${#PIDS[@]} agents running in parallel${C_RST}"
-echo ""
-
-# ─── Live watchdog ────────────────────────────────────────────────
+echo ""; echo "${C_BOLD}▸ Executing MCO…${C_RST}"
 SECONDS=0
-while true; do
-  active=0
-  ok=0; failed=0; tmo=0
-  for sid in "${!PIDS[@]}"; do
-    if kill -0 "${PIDS[$sid]}" 2>/dev/null; then
-      active=$((active+1))
-    elif [ -f "$RUN_DIR/logs/${sid}.status" ]; then
-      sts=$(cut -d'|' -f1 < "$RUN_DIR/logs/${sid}.status")
-      case "$sts" in
-        ok)      ok=$((ok+1)) ;;
-        timeout) tmo=$((tmo+1)) ;;
-        crash)   failed=$((failed+1)) ;;
-      esac
-    fi
-  done
-  fcount=$(wc -l < "$RUN_DIR/_findings.jsonl" 2>/dev/null | tr -d ' \n' || echo 0)
-  printf "\r  [%4ds] active:%d ✓:%d ⏰:%d ❌:%d  findings:%s" "$SECONDS" "$active" "$ok" "$tmo" "$failed" "$fcount"
-  [ "$active" -eq 0 ] && break
-  sleep 5
-done
-echo ""; echo ""
+set +e
+"${MCO_CMD[@]}" > "$RUN_DIR/mco-output/result.json" 2> "$RUN_DIR/mco-output/stderr.log"
+EXIT=$?
+set -e
+DUR=$SECONDS
 
-# ─── Aggregate ────────────────────────────────────────────────────
-FF="$RUN_DIR/_findings.jsonl"
-C=$(grep -cE '"sev"\s*:\s*"c"' "$FF" 2>/dev/null || echo 0); C="${C//[^0-9]/}"
-H=$(grep -cE '"sev"\s*:\s*"h"' "$FF" 2>/dev/null || echo 0); H="${H//[^0-9]/}"
-M=$(grep -cE '"sev"\s*:\s*"m"' "$FF" 2>/dev/null || echo 0); M="${M//[^0-9]/}"
-L=$(grep -cE '"sev"\s*:\s*"l"' "$FF" 2>/dev/null || echo 0); L="${L//[^0-9]/}"
-TOT=$((${C:-0}+${H:-0}+${M:-0}+${L:-0}))
+PHASE="done"; [ $EXIT -ne 0 ] && PHASE="failed"
+jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson e "$EXIT" --argjson d "$DUR" --arg ph "$PHASE" \
+   '. + {completed_at:$now, exit_code:$e, duration_s:$d, phase:$ph}' \
+   "$RUN_DIR/_run.json" > "$RUN_DIR/_run.json.tmp" && mv "$RUN_DIR/_run.json.tmp" "$RUN_DIR/_run.json"
 
-# Per-CLI stats
-CLI_STATS="{}"
-for cli in "${ELIGIBLE[@]}"; do
-  cli_ok=0; cli_failed=0; cli_findings=0
-  for sid in "${!SHARD_CLI[@]}"; do
-    [ "${SHARD_CLI[$sid]}" = "$cli" ] || continue
-    [ -f "$RUN_DIR/logs/${sid}.status" ] || continue
-    sts=$(cut -d'|' -f1 < "$RUN_DIR/logs/${sid}.status")
-    [ "$sts" = "ok" ] && cli_ok=$((cli_ok+1)) || cli_failed=$((cli_failed+1))
-    cli_findings=$((cli_findings + $(grep -c "\"cli\":\"$cli\"" "$FF" 2>/dev/null || echo 0)))
-  done
-  CLI_STATS=$(echo "$CLI_STATS" | jq --arg c "$cli" --argjson o "$cli_ok" --argjson f "$cli_failed" --argjson g "$cli_findings" \
-    '. + {($c): {shards_ok:$o, shards_failed:$f, findings:$g}}')
-done
-
-jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stats "$CLI_STATS" \
-  --argjson c "${C:-0}" --argjson h "${H:-0}" --argjson m "${M:-0}" --argjson l "${L:-0}" \
-  '.phase="done" | .completed_at=$now | .agents=$stats |
-   .stats={findings:{c:$c,h:$h,m:$m,l:$l,total:($c+$h+$m+$l)}}' \
-  "$RUN_DIR/_run.json" > "$RUN_DIR/_run.json.tmp" && mv "$RUN_DIR/_run.json.tmp" "$RUN_DIR/_run.json"
-
-echo "${C_BOLD}╭─ Final ─────────────────────────────────────────────────────╮${C_RST}"
+echo ""; echo "${C_BOLD}╭─ Final ─────────────────────────────────────────────────────╮${C_RST}"
 printf "${C_BOLD}│${C_RST} run-id:   %s\n" "$RUN_ID"
-printf "${C_BOLD}│${C_RST} shards:   %d (max-parallel %d)\n" "$SHARD_COUNT" "$MAX_PARALLEL"
-printf "${C_BOLD}│${C_RST} findings: ${C_RED}%s${C_RST}c ${C_AMBER}%s${C_RST}h ${C_AMBER}%s${C_RST}m ${C_GREEN}%s${C_RST}l (total %d)\n" "${C:-0}" "${H:-0}" "${M:-0}" "${L:-0}" "$TOT"
-printf "${C_BOLD}│${C_RST} duration: %ds\n" "$SECONDS"
-echo "${C_BOLD}│${C_RST} per-CLI:"
-echo "$CLI_STATS" | jq -r 'to_entries[] | "  \(.key): \(.value.shards_ok)/\(.value.shards_ok + .value.shards_failed) shards · \(.value.findings) findings"' | sed "s/^/${C_BOLD}│${C_RST}   /"
-echo "${C_BOLD}│${C_RST}"
+printf "${C_BOLD}│${C_RST} duration: %ds  exit: %d\n" "$DUR" "$EXIT"
 printf "${C_BOLD}│${C_RST} reports:  %s/\n" "$RUN_DIR"
 echo "${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RST}"
-echo ""
-echo "${C_GREEN}✓ done${C_RST}"
+exit $EXIT

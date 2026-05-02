@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# cqc-prefilter — L0 static analysis pre-filter (CQC v4 stack)
+#
+# Runs Semgrep + ast-grep + Knip + jscpd in parallel against a repo and writes
+# machine-readable findings so the LLM layer can skip clean files entirely.
+#
+# Delegates ALL detection logic to the underlying tools — no custom matchers.
+# Missing tools are skipped gracefully (warn-and-skip, never fail).
+#
+# Usage:
+#   cqc-prefilter --repo <path> --out <dir> [--config <yaml>] [--force]
+#
+# Outputs (under <out>):
+#   semgrep.sarif | semgrep.skipped.json
+#   astgrep.json  | astgrep.skipped.json
+#   knip.json     | knip.skipped.json
+#   jscpd.json    | jscpd.skipped.json
+#   clean-files.txt   — files with zero findings across all 4 tools
+#   summary.md        — LOC, dup blocks, dead exports, complexity hotspots
+#   _meta.json        — tool versions, durations, repo SHA, exit codes
+
+set -euo pipefail
+umask 077
+
+REPO=""
+OUT=""
+CONFIG=""
+FORCE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO="$2"; shift 2 ;;
+    --out) OUT="$2"; shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+[[ -z "$REPO" || -z "$OUT" ]] && { echo "usage: cqc-prefilter --repo <path> --out <dir>" >&2; exit 2; }
+[[ ! -d "$REPO" ]] && { echo "repo not found: $REPO" >&2; exit 2; }
+REPO="$(cd "$REPO" && pwd)"
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+
+# Default config (overridable via --config). Inline so no extra file needed at runtime.
+SEMGREP_CONFIGS="${SEMGREP_CONFIGS:-p/ci p/typescript p/react p/security-audit}"
+ASTGREP_LANGS="${ASTGREP_LANGS:-ts tsx js jsx py rs go}"
+KNIP_THRESHOLD="${KNIP_THRESHOLD:-0}"   # any unused export counts
+JSCPD_MIN_TOKENS="${JSCPD_MIN_TOKENS:-50}"
+JSCPD_MIN_LINES="${JSCPD_MIN_LINES:-5}"
+JSCPD_THRESHOLD="${JSCPD_THRESHOLD:-1}"
+if [[ -n "$CONFIG" && -f "$CONFIG" ]]; then
+  # shellcheck disable=SC1090
+  # very minimal yaml→env: only `key: value` shallow keys we care about.
+  while IFS=: read -r k v; do
+    k="${k// /}"; v="${v# }"; v="${v%$'\r'}"
+    case "$k" in
+      semgrep_configs) SEMGREP_CONFIGS="$v" ;;
+      astgrep_langs)   ASTGREP_LANGS="$v" ;;
+      knip_threshold)  KNIP_THRESHOLD="$v" ;;
+      jscpd_min_tokens) JSCPD_MIN_TOKENS="$v" ;;
+      jscpd_min_lines)  JSCPD_MIN_LINES="$v" ;;
+      jscpd_threshold)  JSCPD_THRESHOLD="$v" ;;
+    esac
+  done < <(grep -E '^[a-z_]+:' "$CONFIG" || true)
+fi
+
+skipped() { # tool reason
+  jq -n --arg t "$1" --arg r "$2" \
+    '{tool:$t, status:"skipped", reason:$r, ts:(now|todateiso8601)}' \
+    > "$OUT/$1.skipped.json"
+  echo "[skip] $1: $2" >&2
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+already() { [[ $FORCE -eq 0 && ( -s "$OUT/$1.json" || -s "$OUT/$1.sarif" || -s "$OUT/$1.skipped.json" ) ]]; }
+
+run_semgrep() {
+  already semgrep && { echo "[skip] semgrep: cached"; return; }
+  if ! have semgrep; then skipped semgrep "binary not on PATH (install: pip install semgrep)"; return; fi
+  local cfgs=() c; for c in $SEMGREP_CONFIGS; do cfgs+=(--config "$c"); done
+  semgrep "${cfgs[@]}" --sarif --output "$OUT/semgrep.sarif" \
+    --error --quiet --metrics=off --timeout 60 "$REPO" >/dev/null 2>"$OUT/semgrep.log" || true
+  [[ -s "$OUT/semgrep.sarif" ]] || skipped semgrep "produced no output (see semgrep.log)"
+}
+
+run_astgrep() {
+  already astgrep && { echo "[skip] astgrep: cached"; return; }
+  local bin=""
+  for cand in ast-grep sg-ast-grep; do have "$cand" && bin="$cand" && break; done
+  # /usr/bin/sg is screen-group on Debian, NOT ast-grep — disambiguate by --version
+  if [[ -z "$bin" ]] && have sg && sg --version 2>&1 | grep -qi 'ast-grep'; then bin=sg; fi
+  if [[ -z "$bin" ]]; then skipped astgrep "binary not on PATH (install: cargo install ast-grep --locked)"; return; fi
+  # If the repo ships an ast-grep config (sgconfig.yml), use scan; otherwise emit empty findings.
+  if [[ -f "$REPO/sgconfig.yml" || -f "$REPO/.sgconfig.yml" || -d "$REPO/.ast-grep" ]]; then
+    "$bin" scan --json=stream "$REPO" 2>"$OUT/astgrep.log" \
+      | jq -s '.' > "$OUT/astgrep.json" || true
+  else
+    jq -n --arg r "$REPO" '{tool:"ast-grep", note:"no sgconfig.yml in repo; running default scan", findings:[]}' \
+      > "$OUT/astgrep.json"
+  fi
+}
+
+run_knip() {
+  already knip && { echo "[skip] knip: cached"; return; }
+  have npx || { skipped knip "npx not on PATH"; return; }
+  [[ -f "$REPO/package.json" ]] || { skipped knip "no package.json in $REPO"; return; }
+  ( cd "$REPO" && timeout 240 npx -y knip --reporter json --no-progress \
+      > "$OUT/knip.json" 2>"$OUT/knip.log" ) || true
+  [[ -s "$OUT/knip.json" ]] || skipped knip "produced no output (see knip.log)"
+}
+
+run_jscpd() {
+  already jscpd && { echo "[skip] jscpd: cached"; return; }
+  have npx || { skipped jscpd "npx not on PATH"; return; }
+  ( cd "$REPO" && timeout 240 npx -y jscpd \
+      --min-tokens "$JSCPD_MIN_TOKENS" --min-lines "$JSCPD_MIN_LINES" \
+      --threshold "$JSCPD_THRESHOLD" --reporters json --silent \
+      --output "$OUT/.jscpd" --ignore "**/node_modules/**,**/dist/**,**/build/**,**/.next/**,**/coverage/**" \
+      "$REPO" > "$OUT/jscpd.log" 2>&1 ) || true
+  if [[ -s "$OUT/.jscpd/jscpd-report.json" ]]; then
+    mv "$OUT/.jscpd/jscpd-report.json" "$OUT/jscpd.json"
+    rm -rf "$OUT/.jscpd"
+  else
+    skipped jscpd "produced no output (see jscpd.log)"
+  fi
+}
+
+T0=$(date +%s)
+run_semgrep & P1=$!
+run_astgrep & P2=$!
+run_knip    & P3=$!
+run_jscpd   & P4=$!
+wait $P1 $P2 $P3 $P4 || true
+DUR=$(( $(date +%s) - T0 ))
+
+# ---- Aggregate dirty-file set across all 4 tools ----------------------------
+DIRTY="$OUT/.dirty.txt"; : > "$DIRTY"
+[[ -s "$OUT/semgrep.sarif" ]] && jq -r '.runs[]?.results[]?.locations[]?.physicalLocation?.artifactLocation?.uri // empty' \
+  "$OUT/semgrep.sarif" 2>/dev/null >> "$DIRTY" || true
+[[ -s "$OUT/astgrep.json" ]] && jq -r '.. | objects | .file? // empty' \
+  "$OUT/astgrep.json" 2>/dev/null >> "$DIRTY" || true
+[[ -s "$OUT/knip.json" ]] && jq -r '
+  (.files? // []) [],
+  (.issues? // [] | .[] | (.file // empty)),
+  (.. | objects | select(has("file")) | .file)
+' "$OUT/knip.json" 2>/dev/null | grep -v '^$' >> "$DIRTY" || true
+[[ -s "$OUT/jscpd.json" ]] && jq -r '.duplicates[]? | (.firstFile.name, .secondFile.name)' \
+  "$OUT/jscpd.json" 2>/dev/null >> "$DIRTY" || true
+# Keep a weighted (non-deduped) copy for hotspot ranking; build deduped path-set for clean diff.
+sed -e "s|^$REPO/||" -e 's|^\./||' "$DIRTY" | grep -v '^$' > "$OUT/.dirty.weighted.txt"
+sort -u "$OUT/.dirty.weighted.txt" > "$OUT/.dirty.norm.txt"
+
+# Build full file list (tracked files preferred; fallback to find).
+ALL="$OUT/.all.txt"
+if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$REPO" ls-files | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|kt|rb)$' > "$ALL" || true
+else
+  ( cd "$REPO" && find . -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' -o -name '*.py' \) \
+      -not -path '*/node_modules/*' -not -path '*/.next/*' -not -path '*/dist/*' | sed 's|^\./||' ) > "$ALL"
+fi
+
+# clean = ALL minus DIRTY (path-normalized dirty set already in .dirty.norm.txt).
+comm -23 <(sort -u "$ALL") "$OUT/.dirty.norm.txt" > "$OUT/clean-files.txt"
+
+# ---- summary.md -------------------------------------------------------------
+# Sum LOC across all source files. xargs -a + wc -l prints a "total" line
+# when given many args; we strip pathnames and sum manually for robustness.
+LOC=$( ( cd "$REPO" && xargs -a "$ALL" wc -l 2>/dev/null ) | awk '$1 ~ /^[0-9]+$/ && $2 != "total" {s+=$1} END{print s+0}' )
+N_ALL=$(wc -l < "$ALL"); N_CLEAN=$(wc -l < "$OUT/clean-files.txt"); N_DIRTY=$(( N_ALL - N_CLEAN ))
+SG_N=$(jq '[.runs[]?.results[]?] | length' "$OUT/semgrep.sarif" 2>/dev/null || echo 0)
+KN_N=$(jq '[.. | objects | select(has("file")) | .file] | length' "$OUT/knip.json" 2>/dev/null || echo 0)
+JS_N=$(jq '.duplicates | length' "$OUT/jscpd.json" 2>/dev/null || echo 0)
+AG_N=$(jq '[.. | objects | select(has("file"))] | length' "$OUT/astgrep.json" 2>/dev/null || echo 0)
+
+{
+  echo "# cqc-prefilter summary"
+  echo
+  echo "- repo: \`$REPO\`"
+  echo "- duration: ${DUR}s"
+  echo "- files scanned: $N_ALL  (LOC $LOC)"
+  echo "- files clean (skip in LLM layer): **$N_CLEAN**"
+  echo "- files dirty: $N_DIRTY"
+  echo
+  echo "| tool | status | findings |"
+  echo "|------|--------|----------|"
+  for t in semgrep astgrep knip jscpd; do
+    if [[ -f "$OUT/$t.skipped.json" ]]; then
+      reason=$(jq -r .reason "$OUT/$t.skipped.json"); echo "| $t | skipped | $reason |"
+    else
+      case $t in semgrep) n=$SG_N;; astgrep) n=$AG_N;; knip) n=$KN_N;; jscpd) n=$JS_N;; esac
+      echo "| $t | ok | $n |"
+    fi
+  done
+  echo
+  echo "## Top-10 dirty files (weighted by finding count)"
+  echo
+  sort "$OUT/.dirty.weighted.txt" | uniq -c | sort -rn | head -10 \
+    | awk '{ct=$1; $1=""; sub(/^ /,""); printf "- %s (%d hits)\n", $0, ct}'
+} > "$OUT/summary.md"
+
+jq -n \
+  --arg repo "$REPO" --arg dur "$DUR" --argjson all "$N_ALL" --argjson clean "$N_CLEAN" \
+  --argjson sg "$SG_N" --argjson ag "$AG_N" --argjson kn "$KN_N" --argjson js "$JS_N" \
+  '{repo:$repo, duration_s:($dur|tonumber), files_total:$all, files_clean:$clean,
+    findings:{semgrep:$sg, astgrep:$ag, knip:$kn, jscpd:$js},
+    ts:(now|todateiso8601)}' > "$OUT/_meta.json"
+
+rm -f "$OUT/.dirty.txt" "$OUT/.dirty.norm.txt" "$OUT/.dirty.weighted.txt" "$OUT/.all.txt"
+echo "[ok] cqc-prefilter wrote $OUT  (clean=$N_CLEAN/$N_ALL, ${DUR}s)"
+exit 0

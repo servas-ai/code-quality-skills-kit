@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# cqc-autofix — closed-loop refactor dispatcher (L3).
+# Reads jscpd findings → mco run in git worktree → typecheck/lint/test gates → gh pr.
+# Usage: cqc-autofix --repo <path> --findings prefilter/jscpd.json [--max-prs 3] [--dry-run]
+set -euo pipefail; umask 077
+
+REPO=""; FIND=""; N=3; DRY=0
+PROVS="${CQC_AUTOFIX_PROVIDERS:-claude,gemini}"; BASE="${CQC_AUTOFIX_BASE:-main}"
+while [ "${1:-}" != "" ]; do case "$1" in
+  --repo)      REPO="$2"; shift ;;        --repo=*)      REPO="${1#--repo=}" ;;
+  --findings)  FIND="$2"; shift ;;        --findings=*)  FIND="${1#--findings=}" ;;
+  --max-prs)   N="$2"; shift ;;           --max-prs=*)   N="${1#--max-prs=}" ;;
+  --providers=*) PROVS="${1#--providers=}" ;;
+  --dry-run)   DRY=1 ;;
+  -h|--help)   sed -n '2,5p' "$0"; exit 0 ;;
+esac; shift || true; done
+
+REPO="$(cd "${REPO:-$PWD}" && pwd)"
+[ -n "$FIND" ] || { echo "❌ --findings required" >&2; exit 2; }
+[ -f "$FIND" ] || FIND="$REPO/$FIND"
+[ -f "$FIND" ] || { echo "❌ findings not found: $FIND" >&2; exit 2; }
+C=$'\033[36m'; G=$'\033[32m'; A=$'\033[33m'; R=$'\033[31m'; D=$'\033[2m'; Z=$'\033[0m'
+[ -t 1 ] || { C=""; G=""; A=""; R=""; D=""; Z=""; }
+
+mapfile -t UNITS < <(jq -r --argjson n "$N" '
+  [.duplicates[]?|select(.lines>=30)]|sort_by(-.lines)|.[0:$n]
+  |.[]|"\(.lines)\t\(.firstFile.name)\t\(.secondFile.name)"' "$FIND" 2>/dev/null||true)
+[ "${#UNITS[@]}" -gt 0 ] || { echo "${A}⚠ no actionable duplicates in $FIND${Z}" >&2; exit 0; }
+
+WTBASE="$REPO/.cqc-autofix-wt"; mkdir -p "$WTBASE"; TS="$(date +%Y%m%d-%H%M%S)"
+clean() { local wt="$1" br="$2"; [ -d "$wt" ] && (git -C "$REPO" worktree remove --force "$wt" 2>/dev/null||rm -rf "$wt"); git -C "$REPO" branch -D "$br" 2>/dev/null||true; }
+gate() { local wt="$1" cmd="$2" name="$3"; echo "${D}    [$name] $cmd${Z}" >&2
+  if (cd "$wt" && eval "$cmd") >"$wt/.gate-$name.log" 2>&1; then echo "${G}    ✓ $name${Z}" >&2; return 0
+  fi; echo "${R}    ✗ $name (see $wt/.gate-$name.log)${Z}" >&2; return 1; }
+
+i=0
+for u in "${UNITS[@]}"; do i=$((i+1))
+  L="$(echo "$u"|cut -f1)"; F1="$(echo "$u"|cut -f2)"; F2="$(echo "$u"|cut -f3)"
+  TITLE="refactor: extract shared logic between $(basename "$F1") and $(basename "$F2") (-${L} dup lines)"
+  BR="cqc-autofix/$TS-$i"
+  echo ""; echo "${C}━━━ unit $i/${#UNITS[@]} — ${L} dup lines${Z}"
+  echo "${C}    A: $F1${Z}"; echo "${C}    B: $F2${Z}"; echo "${C}    PR: $TITLE${Z}"
+  if [ "$DRY" = "1" ]; then echo "${A}    [dry-run] would: worktree → mco run → gates → gh pr create${Z}"; continue; fi
+
+  WT="$WTBASE/$BR"
+  git -C "$REPO" worktree add -b "$BR" "$WT" "$BASE" 2>/dev/null \
+    || { echo "${R}    ✗ worktree create failed${Z}" >&2; continue; }
+  PROMPT="Refactor: extract duplicated logic between '$F1' and '$F2' into a single shared module. Reduce LOC, abstract the pattern, keep behavior identical, update all imports. Output minimal diff."
+  if ! mco run --repo "$WT" --prompt "$PROMPT" --providers "$PROVS" \
+       --target-paths "$F1,$F2" --result-mode artifact \
+       --artifact-base "$WT/.mco-out" --stall-timeout 600 2>&1|tail -10; then
+    echo "${R}    ✗ mco run failed${Z}" >&2; clean "$WT" "$BR"; continue
+  fi
+  if git -C "$WT" diff --quiet && git -C "$WT" diff --cached --quiet; then
+    echo "${A}    ⚠ no changes produced${Z}" >&2; clean "$WT" "$BR"; continue
+  fi
+  git -C "$WT" add -A && git -C "$WT" commit -m "$TITLE" >/dev/null 2>&1 || true
+
+  OK=1
+  PM="pnpm"; [ -f "$REPO/package-lock.json" ] && PM="npm"
+  gate "$WT" "$PM run typecheck" "typecheck" || OK=0
+  gate "$WT" "$PM run lint"      "lint"      || OK=0
+  gate "$WT" "$PM test --silent" "test"      || OK=0
+
+  if [ "$OK" = "1" ]; then
+    git -C "$WT" push -u origin "$BR" 2>&1|tail -3 || true
+    if command -v gh >/dev/null; then
+      gh pr create --title "$TITLE" --base "$BASE" --head "$BR" \
+        --body "Automated refactor by cqc-autofix. Reduces ${L} duplicate lines between \`$F1\` and \`$F2\`. Gates passed: typecheck, lint, test." 2>&1|tail -3 || true
+      echo "${G}    ✓ PR opened${Z}"
+    else echo "${A}    ⚠ gh CLI missing; branch pushed${Z}"; fi
+  else echo "${R}    ✗ gates failed — NOT opening PR${Z}"; fi
+  clean "$WT" "$BR"
+done
+echo ""; echo "${G}done.${Z}"

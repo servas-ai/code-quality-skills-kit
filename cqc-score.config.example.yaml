@@ -1,0 +1,43 @@
+# cqc-score.config.yaml — KPI thresholds for L3 score tracker
+#
+# Drop this file in your repo root (rename to cqc-score.config.yaml).
+# Used by `cqc-score --diff before after` to decide whether a CQC run
+# regressed quality KPIs. Any threshold breach makes the diff exit 1.
+#
+# Philosophy: the user wants LOC reduction + logic abstraction — NOT more
+# noise. So defaults are strict on size/duplication, lenient on counts.
+
+thresholds:
+  # LOC growth in % is a regression beyond this point.
+  # 5% = "small unavoidable growth from new features"; 0 = "must shrink"
+  loc_regression_pct: 5
+
+  # Any increase in duplicate lines is a regression by default.
+  duplicate_regression_pct: 0
+
+  # Max-cyclomatic-complexity may not increase at all.
+  complexity_max_increase: 0
+
+  # Dead exports may not increase (knip).
+  dead_exports_increase: 0
+
+# ── Tools (auto-detected; override only if needed) ────────────────
+tools:
+  loc:        cloc          # alt: "find+wc" fallback (built-in)
+  complexity: ts-complex    # alt: escomplex-cli
+  duplicates: jscpd
+  dead:       knip
+
+# ── Auto-fix dispatch settings (consumed by cqc-autofix) ──────────
+autofix:
+  # Open at most N PRs per autofix run.
+  max_prs: 3
+  # Only refactor duplicate clusters with this many lines or more.
+  min_duplicate_lines: 30
+  # MCO providers to dispatch to (comma-separated).
+  providers: claude,gemini
+  # Hard gates run inside the worktree before any PR opens.
+  gates:
+    - pnpm run typecheck
+    - pnpm run lint
+    - pnpm test --silent
