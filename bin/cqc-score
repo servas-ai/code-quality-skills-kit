@@ -17,9 +17,22 @@ REPO="$(cd "${REPO:-$PWD}" && pwd)"
 
 if [ -z "$RUN_DIR" ]; then
   AR="$REPO/audit-reports"; mkdir -p "$AR"
-  RUN_DIR="$(ls -1dt "$AR"/*/ 2>/dev/null | head -1 || true)"
-  [ -z "$RUN_DIR" ] && RUN_DIR="$AR/$(date +%Y-%m-%d)__score-$(date +%H%M%S)" && mkdir -p "$RUN_DIR"
-  RUN_DIR="${RUN_DIR%/}"
+  if [ -n "$A" ] && [ -n "$B" ]; then
+    # --diff: find the newest run-dir that contains BOTH snapshot files.
+    # Prevents picking a run-dir created between `--label before` and `--label after`.
+    RUN_DIR=""
+    while IFS= read -r d; do
+      d="${d%/}"
+      if [ -f "$d/score/${A}.json" ] && [ -f "$d/score/${B}.json" ]; then
+        RUN_DIR="$d"; break
+      fi
+    done < <(ls -1dt "$AR"/*/ 2>/dev/null)
+    [ -z "$RUN_DIR" ] && { echo "❌ no run-dir contains both score/${A}.json and score/${B}.json under $AR" >&2; exit 2; }
+  else
+    RUN_DIR="$(ls -1dt "$AR"/*/ 2>/dev/null | head -1 || true)"
+    [ -z "$RUN_DIR" ] && RUN_DIR="$AR/$(date +%Y-%m-%d)__score-$(date +%H%M%S)" && mkdir -p "$RUN_DIR"
+    RUN_DIR="${RUN_DIR%/}"
+  fi
 fi
 mkdir -p "$RUN_DIR/score"
 G=$'\033[32m'; R=$'\033[31m'; C=$'\033[36m'; Z=$'\033[0m'; [ -t 1 ] || { G=""; R=""; C=""; Z=""; }

@@ -550,6 +550,10 @@ def list_runs():
             done, total = file_progress(full)
             info["files_done"] = done
             info["files_total"] = total
+            # CLI-launched runs (cqc-orchestrate from terminal) write phase="running"
+            # to disk but never appear in RUNNING_PROCS. Treat disk phase as live.
+            if info["phase"] in ("running", "in_progress"):
+                info["live"] = True
             runs.append(info)
     # Overlay UI-spawned runs as live (prepend, dedup by id)
     seen = {r["id"] for r in runs}
