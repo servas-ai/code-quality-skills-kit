@@ -13,7 +13,7 @@ cli_agents:
 budget_thresholds:
   claude: 75%
   gemini: 75%
-  opencode: 75%
+  opencode: 0%   # disabled by default in v4: opencode CLI stalls under MCO (spawns sub-agents that never return). Set to 75% if your opencode setup is stable.
   codex: 75%
 
 # Hard stop if any CLI hits its threshold during the run

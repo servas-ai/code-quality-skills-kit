@@ -34,7 +34,7 @@ def load_budget():
     try:
         with open(BUDGET_FILE) as f: return json.load(f)
     except Exception:
-        return {"caps_pct": {"claude":0,"codex":50,"gemini":100,"opencode":100},
+        return {"caps_pct": {"claude":0,"codex":50,"gemini":100,"opencode":0},
                 "models": {"opencode_model":"opencode-go/glm-5.1",
                            "gemini_primary":"gemini-3.1-pro-preview",
                            "gemini_fallback":"gemini-3-flash-preview"},
