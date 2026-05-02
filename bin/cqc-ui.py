@@ -26,13 +26,13 @@ from datetime import datetime, timezone
 ROOT = os.environ.get("CQC_ROOT", os.getcwd())
 PORT = int(os.environ.get("CQC_PORT", "4020"))
 VERSION = os.environ.get("CQC_VERSION", "v3.19")
-CLIS = ("claude", "gemini", "opencode", "codex")
+CLIS = ("claude", "gemini", "opencode", "codex", "qwen")
 BUDGET_FILE = os.path.expanduser("~/.cqc/budget.json")
 USAGE_FILE  = os.path.expanduser("~/.cqc/usage.json")
 
 
 def load_budget():
-    defaults = {"caps_pct": {"claude":0,"codex":50,"gemini":100,"opencode":0},
+    defaults = {"caps_pct": {"claude":0,"codex":50,"gemini":100,"opencode":0,"qwen":0},
                 "models": {"opencode_model":"opencode-go/glm-5.1",
                            "gemini_primary":"gemini-3.1-pro-preview",
                            "gemini_fallback":"gemini-3-flash-preview"},
@@ -278,6 +278,10 @@ def get_account_info(cli):
             info["plan"] = ", ".join(p["name"] for p in providers) if providers else "no providers"
         except Exception as e:
             info["error"] = f"parse error: {e}"
+    elif cli == "qwen":
+        # qwen quota tracking not implemented yet — show tile honestly with stub
+        info["auth_type"] = "unknown"
+        info["error"] = "qwen quota tracking not implemented yet"
     return info
 
 
@@ -511,6 +515,9 @@ def file_progress(run_dir):
                     done += 1
         except Exception: pass
     if total and done > total: done = total
+    # Legacy runs without prefilter context: no _dirty.txt/_all.txt → total==0.
+    # Force done=0 so UI shows "—" (elapsed only) instead of "1/0".
+    if total == 0: done = 0
     return done, total
 
 

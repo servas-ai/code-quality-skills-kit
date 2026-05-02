@@ -28,8 +28,13 @@ cp "$TMP/kit/bin/cqc" "$DEST/cqc"
 cp "$TMP/kit/bin/cqc-budget" "$DEST/cqc-budget"
 cp "$TMP/kit/bin/cqc-ui" "$DEST/cqc-ui"
 cp "$TMP/kit/bin/cqc-orchestrate" "$DEST/cqc-orchestrate"
-chmod +x "$DEST/cqc" "$DEST/cqc-budget" "$DEST/cqc-ui" "$DEST/cqc-orchestrate"
-echo "🔧 Installed: cqc + cqc-budget + cqc-ui + cqc-orchestrate → $DEST/"
+cp "$TMP/kit/bin/cqc-prefilter" "$DEST/cqc-prefilter"
+cp "$TMP/kit/bin/cqc-score" "$DEST/cqc-score"
+cp "$TMP/kit/bin/cqc-autofix" "$DEST/cqc-autofix"
+cp "$TMP/kit/bin/cqc-watch" "$DEST/cqc-watch"
+chmod +x "$DEST/cqc" "$DEST/cqc-budget" "$DEST/cqc-ui" "$DEST/cqc-orchestrate" \
+         "$DEST/cqc-prefilter" "$DEST/cqc-score" "$DEST/cqc-autofix" "$DEST/cqc-watch"
+echo "🔧 Installed: cqc + cqc-budget + cqc-ui + cqc-orchestrate + cqc-prefilter + cqc-score + cqc-autofix + cqc-watch → $DEST/"
 # v4: cqc-parallel removed (delegated to MCO via cqc-orchestrate). Clean up legacy install.
 rm -f "$DEST/cqc-parallel"
 
