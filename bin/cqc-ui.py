@@ -58,6 +58,7 @@ def load_usage():
 # Gemini local usage tracker — parses ~/.gemini/tmp/<project>/chats/session-*.jsonl.
 # OAuth-personal Ultra cap: 2000 prompts/day; weekly extrapolation = 14000.
 gemini_usage_cache = {"ts": 0, "data": None}
+gemini_usage_lock = threading.Lock()
 GEMINI_DAILY_CAP = 2000
 GEMINI_WEEKLY_CAP = 14000
 
@@ -67,87 +68,95 @@ def get_gemini_local_usage():
 
     Caches result for 60s. Reads ALL session files (capped at 1000 newest by mtime),
     dedupes events by `id`, sums tokens.total, buckets by today / last 7 days.
+
+    Lock-protected: concurrent callers wait for the first to populate the cache
+    instead of each doing their own multi-second parse over GBs of JSONL.
     """
     now = time.time()
     if gemini_usage_cache["data"] and (now - gemini_usage_cache["ts"]) < 60:
         return gemini_usage_cache["data"]
-    cutoff_24h = now - 86400
-    cutoff_7d  = now - 7 * 86400
-    today_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    pattern = os.path.expanduser("~/.gemini/tmp/*/chats/session-*.jsonl")
-    files = glob.glob(pattern)
-    # Sort by mtime desc, cap at 1000 newest
-    files = sorted(files, key=lambda p: os.path.getmtime(p) if os.path.isfile(p) else 0, reverse=True)[:1000]
-    seen = set()
-    calls_today = calls_7d = 0
-    tokens_today = tokens_7d = 0
-    for fp in files:
-        try:
-            mtime = os.path.getmtime(fp)
-        except OSError:
-            continue
-        if mtime < cutoff_7d:
-            continue
-        try:
-            with open(fp, "r", errors="ignore") as fh:
-                for line in fh:
-                    if '"type":"gemini"' not in line:
-                        continue
-                    try:
-                        ev = json.loads(line)
-                    except Exception:
-                        continue
-                    if ev.get("type") != "gemini":
-                        continue
-                    ts = ev.get("timestamp") or ""
-                    tk = ev.get("tokens") or {}
-                    total = tk.get("total")
-                    if total is None:
-                        total = (tk.get("input") or 0) + (tk.get("output") or 0)
-                    eid = ev.get("id")
-                    if eid:
-                        if eid in seen:
+    with gemini_usage_lock:
+        # Re-check under lock — another thread may have populated while we waited.
+        now = time.time()
+        if gemini_usage_cache["data"] and (now - gemini_usage_cache["ts"]) < 60:
+            return gemini_usage_cache["data"]
+        cutoff_24h = now - 86400
+        cutoff_7d  = now - 7 * 86400
+        today_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pattern = os.path.expanduser("~/.gemini/tmp/*/chats/session-*.jsonl")
+        files = glob.glob(pattern)
+        # Sort by mtime desc, cap at 1000 newest
+        files = sorted(files, key=lambda p: os.path.getmtime(p) if os.path.isfile(p) else 0, reverse=True)[:1000]
+        seen = set()
+        calls_today = calls_7d = 0
+        tokens_today = tokens_7d = 0
+        for fp in files:
+            try:
+                mtime = os.path.getmtime(fp)
+            except OSError:
+                continue
+            if mtime < cutoff_7d:
+                continue
+            try:
+                with open(fp, "r", errors="ignore") as fh:
+                    for line in fh:
+                        if '"type":"gemini"' not in line:
                             continue
-                        seen.add(eid)
-                    # Parse ISO timestamp -> epoch
-                    t_epoch = None
-                    if ts:
                         try:
-                            t_epoch = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                            ev = json.loads(line)
                         except Exception:
-                            t_epoch = None
-                    if t_epoch is None:
-                        t_epoch = mtime  # best-effort fallback
-                    if t_epoch >= cutoff_7d:
-                        calls_7d += 1
-                        tokens_7d += int(total or 0)
-                    # Today bucket: prefer date-string match if ts present
-                    is_today = False
-                    if ts and ts[:10] == today_str:
-                        is_today = True
-                    elif t_epoch >= cutoff_24h:
-                        is_today = True
-                    if is_today:
-                        calls_today += 1
-                        tokens_today += int(total or 0)
-        except Exception:
-            continue
-    daily_pct = round(min(100.0, (calls_today / GEMINI_DAILY_CAP) * 100), 1) if GEMINI_DAILY_CAP else 0
-    weekly_pct = round(min(100.0, (calls_7d / GEMINI_WEEKLY_CAP) * 100), 1) if GEMINI_WEEKLY_CAP else 0
-    data = {
-        "calls_today": calls_today,
-        "calls_7d": calls_7d,
-        "tokens_today": tokens_today,
-        "tokens_7d": tokens_7d,
-        "used_pct_daily": daily_pct,
-        "weekly_used_pct": weekly_pct,
-        "daily_cap": GEMINI_DAILY_CAP,
-        "weekly_cap": GEMINI_WEEKLY_CAP,
-        "files_scanned": len(files),
-    }
-    gemini_usage_cache["ts"] = now
-    gemini_usage_cache["data"] = data
-    return data
+                            continue
+                        if ev.get("type") != "gemini":
+                            continue
+                        ts = ev.get("timestamp") or ""
+                        tk = ev.get("tokens") or {}
+                        total = tk.get("total")
+                        if total is None:
+                            total = (tk.get("input") or 0) + (tk.get("output") or 0)
+                        eid = ev.get("id")
+                        if eid:
+                            if eid in seen:
+                                continue
+                            seen.add(eid)
+                        # Parse ISO timestamp -> epoch
+                        t_epoch = None
+                        if ts:
+                            try:
+                                t_epoch = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                            except Exception:
+                                t_epoch = None
+                        if t_epoch is None:
+                            t_epoch = mtime  # best-effort fallback
+                        if t_epoch >= cutoff_7d:
+                            calls_7d += 1
+                            tokens_7d += int(total or 0)
+                        # Today bucket: prefer date-string match if ts present
+                        is_today = False
+                        if ts and ts[:10] == today_str:
+                            is_today = True
+                        elif t_epoch >= cutoff_24h:
+                            is_today = True
+                        if is_today:
+                            calls_today += 1
+                            tokens_today += int(total or 0)
+            except Exception:
+                continue
+        daily_pct = round(min(100.0, (calls_today / GEMINI_DAILY_CAP) * 100), 1) if GEMINI_DAILY_CAP else 0
+        weekly_pct = round(min(100.0, (calls_7d / GEMINI_WEEKLY_CAP) * 100), 1) if GEMINI_WEEKLY_CAP else 0
+        data = {
+            "calls_today": calls_today,
+            "calls_7d": calls_7d,
+            "tokens_today": tokens_today,
+            "tokens_7d": tokens_7d,
+            "used_pct_daily": daily_pct,
+            "weekly_used_pct": weekly_pct,
+            "daily_cap": GEMINI_DAILY_CAP,
+            "weekly_cap": GEMINI_WEEKLY_CAP,
+            "files_scanned": len(files),
+        }
+        gemini_usage_cache["ts"] = now
+        gemini_usage_cache["data"] = data
+        return data
 
 
 def jwt_payload(token):
